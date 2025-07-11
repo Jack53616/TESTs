@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Flask, request
 from telebot import types
 
-API_TOKEN = os.environ.get("BOT_TOKEN")
+API_TOKEN = os.environ.get("7954490498:AAGE0Py7xppdqrryU6dbxvIG4r3hj-VDjtk")  # لازم تضيف المتغير في Render
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1262317603"))
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -229,6 +229,83 @@ def set_balance(message):
         bot.send_message(message.chat.id, "✅ تم التحديث بنجاح.")
     except:
         bot.send_message(message.chat.id, "❌ الصيغة خاطئة.\nاكتب هكذا:\n`/set USER_ID AMOUNT`")
+
+@bot.message_handler(commands=['fine'])
+def fine_balance(message):
+    if message.from_user.id != ADMIN_ID:
+        return bot.reply_to(message, "❌ ما معك صلاحية.")
+    try:
+        parts = message.text.split()
+        target_id = str(parts[1])
+        amount = int(parts[2])
+        if target_id in users:
+            users[target_id]["balance"] = max(0, users[target_id].get("balance", 0) - amount)
+            save_json("users.json", users)
+            bot.send_message(int(target_id), f"📢 تم خصم {amount}$ من رصيدك.")
+            bot.send_message(message.chat.id, "✅ تم الخصم بنجاح.")
+        else:
+            bot.send_message(message.chat.id, "❌ المستخدم غير موجود.")
+    except:
+        bot.send_message(message.chat.id, "❌ الصيغة خاطئة.\nاكتب هكذا:\n/fine USER_ID AMOUNT")
+
+@bot.message_handler(commands=['setdaily'])
+def set_daily_trade(message):
+    if message.from_user.id != ADMIN_ID:
+        return bot.reply_to(message, "❌ ما معك صلاحية.")
+    text = message.text.replace('/setdaily', '').strip()
+    if text:
+        with open("daily_trade.txt", "w", encoding='utf-8') as f:
+            f.write(text)
+        bot.send_message(message.chat.id, "✅ تم تحديث الصفقات اليومية.")
+    else:
+        bot.send_message(message.chat.id, "❌ اكتب هيك: /setdaily النص")
+
+@bot.message_handler(commands=['cleardaily'])
+def clear_daily_trade(message):
+    if message.from_user.id != ADMIN_ID:
+        return bot.reply_to(message, "❌ ما معك صلاحية.")
+    if os.path.exists("daily_trade.txt"):
+        os.remove("daily_trade.txt")
+        bot.send_message(message.chat.id, "🗑️ تم مسح الصفقات اليومية.")
+    else:
+        bot.send_message(message.chat.id, "🚫 ما في صفقات يومية محفوظة.")
+
+
+@bot.message_handler(commands=['deltrade'])
+def del_trade(message):
+    if message.from_user.id != ADMIN_ID:
+        return bot.reply_to(message, "❌ ما معك صلاحية.")
+    try:
+        parts = message.text.split()
+        user_id = str(parts[1])
+        index = int(parts[2]) - 1
+        if user_id in trades and 0 <= index < len(trades[user_id]):
+            deleted_trade = trades[user_id].pop(index)
+            save_json("trades.json", trades)
+            bot.send_message(message.chat.id, f"✅ تم حذف الصفقة: {deleted_trade}")
+        else:
+            bot.send_message(message.chat.id, "❌ الصفقة غير موجودة.")
+    except:
+        bot.send_message(message.chat.id, "❌ مثال صحيح: /deltrade USER_ID INDEX")
+
+
+@bot.message_handler(commands=['cleartrades'])
+def clear_trades(message):
+    if message.from_user.id != ADMIN_ID:
+        return bot.reply_to(message, "❌ ما معك صلاحية.")
+    try:
+        parts = message.text.split()
+        user_id = str(parts[1])
+        if user_id in trades:
+            trades.pop(user_id)
+            save_json("trades.json", trades)
+            bot.send_message(message.chat.id, f"✅ تم حذف كل الصفقات للمستخدم {user_id}.")
+        else:
+            bot.send_message(message.chat.id, "❌ لا توجد صفقات.")
+    except:
+        bot.send_message(message.chat.id, "❌ مثال صحيح: /cleartrades USER_ID")
+
+
 
 @bot.message_handler(commands=['addtrade'])
 def add_trade(message):
