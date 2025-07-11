@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Flask, request
 from telebot import types
 
-API_TOKEN = os.environ.get("7954490498:AAGE0Py7xppdqrryU6dbxvIG4r3hj-VDjtk")  # لازم تضيف المتغير في Render
+API_TOKEN = os.environ.get("BOT_TOKEN")  # لازم تضيف المتغير في Render
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1262317603"))
 
 bot = telebot.TeleBot(API_TOKEN)
