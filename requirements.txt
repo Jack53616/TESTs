@@ -1,4 +1,4 @@
-flask
 pyTelegramBotAPI
+Flask
 SQLAlchemy
 psycopg2-binary
