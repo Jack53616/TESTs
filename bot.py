@@ -13,7 +13,7 @@ USE_DB = bool(os.environ.get("DATABASE_URL"))
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
 
-# ========= تخزين (اختياري Postgres) =========
+# ========= Optional: Postgres persistence via db_kv =========
 if USE_DB:
     from db_kv import init_db, get_json, set_json
     init_db()
@@ -43,8 +43,7 @@ def save_json(filename, data):
             else:
                 f.write(str(data))
 
-# ========= حِزم اللغات =========
-# مفاتيح النصوص مشتركة بين كل الميزات: لو ضفنا خيار جديد لاحقاً، نضيف مفتاحه لكل اللغات هون.
+# ========= Languages (EN default) =========
 LANGS = ["en", "ar", "tr", "es", "de", "ru"]
 TEXT = {
     "en": {
@@ -351,7 +350,7 @@ TEXT = {
 
 def get_lang(uid: str) -> str:
     users = load_json("users.json") or {}
-    lang = (users.get(uid, {}) or {}).get("lang", "en")  # الافتراضي: EN
+    lang = (users.get(uid, {}) or {}).get("lang", "en")  # default EN
     return lang if lang in LANGS else "en"
 
 def set_lang(uid: str, lang: str):
@@ -368,19 +367,22 @@ def T(uid: str, key: str, **kwargs) -> str:
     except Exception:
         return s
 
-# ========= Webhook =========
+# ========= Webhook (allow updates) =========
 if WEBHOOK_BASE:
     try:
         bot.remove_webhook()
     except Exception:
         pass
     try:
-        bot.set_webhook(url=f"{WEBHOOK_BASE}/{API_TOKEN}")
+        bot.set_webhook(
+            url=f"{WEBHOOK_BASE}/{API_TOKEN}",
+            allowed_updates=["message", "callback_query"]
+        )
         print("Webhook set to:", f"{WEBHOOK_BASE}/{API_TOKEN}")
     except Exception as e:
         print("Failed to set webhook:", e)
 
-# ========= صلاحيات =========
+# ========= Roles =========
 def _load_staff_set():
     data = load_json("staff.json") or {}
     ids = data.get("ids", [])
@@ -401,7 +403,7 @@ def is_admin(user_id: int) -> bool:
 def is_staff(user_id: int) -> bool:
     return is_admin(user_id) or (int(user_id) in _load_staff_set())
 
-# ========= واجهة =========
+# ========= UI =========
 def ensure_user(chat_id: int) -> str:
     uid = str(chat_id)
     users = load_json("users.json") or {}
@@ -425,6 +427,91 @@ def show_main_menu(chat_id: int):
     users = load_json("users.json") or {}
     balance = users.get(uid, {}).get("balance", 0)
     bot.send_message(chat_id, T(uid, "welcome", balance=balance, uid=uid), reply_markup=main_menu_markup(uid))
+
+# ========= Commands registration (hide admin for users) =========
+def register_commands():
+    public_cmds = {
+        "en": [
+            types.BotCommand("start","Main menu"),
+            types.BotCommand("help","Commands list"),
+            types.BotCommand("id","Show your ID"),
+            types.BotCommand("balance","Your balance"),
+            types.BotCommand("daily","Daily trade"),
+            types.BotCommand("withdraw","Request withdrawal"),
+            types.BotCommand("mystatus","Check my role"),
+        ],
+        "ar": [
+            types.BotCommand("start","القائمة الرئيسية"),
+            types.BotCommand("help","قائمة الأوامر"),
+            types.BotCommand("id","إظهار آيديك"),
+            types.BotCommand("balance","رصيدك"),
+            types.BotCommand("daily","صفقة اليوم"),
+            types.BotCommand("withdraw","طلب سحب"),
+            types.BotCommand("mystatus","فحص صلاحياتي"),
+        ],
+        "tr": [
+            types.BotCommand("start","Ana menü"),
+            types.BotCommand("help","Komut listesi"),
+            types.BotCommand("id","Kimliğini göster"),
+            types.BotCommand("balance","Bakiyen"),
+            types.BotCommand("daily","Günlük işlem"),
+            types.BotCommand("withdraw","Çekim talebi"),
+            types.BotCommand("mystatus","Rolümü kontrol et"),
+        ],
+        "es": [
+            types.BotCommand("start","Menú principal"),
+            types.BotCommand("help","Lista de comandos"),
+            types.BotCommand("id","Mostrar tu ID"),
+            types.BotCommand("balance","Tu saldo"),
+            types.BotCommand("daily","Operación diaria"),
+            types.BotCommand("withdraw","Solicitar retiro"),
+            types.BotCommand("mystatus","Ver mi rol"),
+        ],
+        "de": [
+            types.BotCommand("start","Hauptmenü"),
+            types.BotCommand("help","Befehlsliste"),
+            types.BotCommand("id","ID anzeigen"),
+            types.BotCommand("balance","Guthaben"),
+            types.BotCommand("daily","Tages-Trade"),
+            types.BotCommand("withdraw","Auszahlung anfordern"),
+            types.BotCommand("mystatus","Rolle prüfen"),
+        ],
+        "ru": [
+            types.BotCommand("start","Главное меню"),
+            types.BotCommand("help","Список команд"),
+            types.BotCommand("id","Показать ID"),
+            types.BotCommand("balance","Баланс"),
+            types.BotCommand("daily","Сделка дня"),
+            types.BotCommand("withdraw","Запрос на вывод"),
+            types.BotCommand("mystatus","Моя роль"),
+        ],
+    }
+    admin_extra = [
+        types.BotCommand("addbalance","STAFF: add balance"),
+        types.BotCommand("setdaily","STAFF: set daily"),
+        types.BotCommand("setbalance","ADMIN: set balance"),
+        types.BotCommand("broadcast","ADMIN: broadcast"),
+        types.BotCommand("promote","ADMIN: promote"),
+        types.BotCommand("demote","ADMIN: demote"),
+    ]
+    # Default per-language (users see only public)
+    for lc in ["en","ar","tr","es","de","ru"]:
+        try:
+            bot.set_my_commands(public_cmds[lc], scope=types.BotCommandScopeDefault(), language_code=lc)
+        except Exception as e:
+            print("set_my_commands default", lc, "error:", e)
+    try:
+        bot.set_my_commands(public_cmds["en"], scope=types.BotCommandScopeDefault())
+    except Exception as e:
+        print("set_my_commands default fallback error:", e)
+    # Admin chat scope (public + admin)
+    for lc in ["en","ar","tr","es","de","ru"]:
+        try:
+            bot.set_my_commands(public_cmds[lc] + admin_extra, scope=types.BotCommandScopeChat(chat_id=ADMIN_ID), language_code=lc)
+        except Exception as e:
+            print("set_my_commands admin", lc, "error:", e)
+
+register_commands()
 
 # ========= Normalize & Parse =========
 ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
@@ -457,13 +544,12 @@ def parse_command(message):
     args = raw[len(cmd_token):].strip()
     return cmd, args
 
-# ========= راوتر أوامر =========
+# ========= Router =========
 @bot.message_handler(content_types=['text'])
 def router(message):
     text_raw = message.text or ""
     uid = str(message.from_user.id)
 
-    # لو مش أمر: نرسلها للأدمِن كتنبيه
     if not text_raw.strip().startswith(("/", "／")):
         try:
             bot.send_message(ADMIN_ID, f"📩 Message from {uid}:\n{text_raw}")
@@ -474,7 +560,7 @@ def router(message):
     cmd, args = parse_command(message)
     print("ROUTER:", cmd, "| ARGS:", repr(args), "| FROM:", uid)
 
-    # عام
+    # General
     if cmd == "start":
         ensure_user(message.chat.id)
         return show_main_menu(message.chat.id)
@@ -486,7 +572,6 @@ def router(message):
         lines = [tt["help_title"], *tt["help_public"]]
         if isS: lines += ["", tt["help_staff_title"], *tt["help_staff"]]
         if isA: lines += ["", tt["help_admin_title"], *tt["help_admin"]]
-        # ملاحظة: التحكم من الزر، مش لازم تكتب أمر لتغيير اللغة.
         return bot.reply_to(message, "\n".join(lines))
 
     if cmd == "id":
@@ -522,14 +607,13 @@ def router(message):
         save_json("withdraw_requests.json", withdraw_requests)
         return bot.reply_to(message, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
 
-    # Staff/Admin (نفس السلوك السابق)
+    # Staff/Admin
     if cmd == "setdaily":
         if not is_staff(message.from_user.id):
             return
         if not args:
-            # رسالة مختصرة بكل اللغات المحتملة
             lc = get_lang(uid)
-            txt = {
+            msg = {
                 "en": "❌ Format: /setdaily <text>",
                 "ar": "❌ اكتب النص: /setdaily <النص>",
                 "tr": "❌ Format: /setdaily <metin>",
@@ -537,7 +621,7 @@ def router(message):
                 "de": "❌ Format: /setdaily <Text>",
                 "ru": "❌ Формат: /setdaily <текст>",
             }.get(lc, "❌ Format: /setdaily <text>")
-            return bot.reply_to(message, txt)
+            return bot.reply_to(message, msg)
         save_json("daily_trade.txt", args)
         conf = {
             "en": "Daily trade updated ✅",
@@ -562,7 +646,6 @@ def router(message):
                 "de":"❌ Nutzung: /addbalance <user_id> <betrag>",
                 "ru":"❌ Использование: /addbalance <user_id> <amount>",
             }[get_lang(uid)])
-            # NOTE: ru keeps "amount" to avoid long word; adjust if you prefer "сумма"
         uid_str, amount_str = parts
         amount = int(amount_str)
         users = load_json("users.json") or {}
@@ -623,7 +706,27 @@ def router(message):
         else:
             return bot.reply_to(message, "not staff")
 
-# ========= أزرار الكولباك =========
+# ===== Force-pass commands to router (extra safety) =====
+@bot.message_handler(commands=[
+    "start","help","id","balance","daily","withdraw","mystatus",
+    "addbalance","setdaily","setbalance","broadcast","promote","demote"
+])
+def _commands_passthrough(message):
+    try:
+        router(message)
+    except Exception as e:
+        print("passthrough error:", e)
+
+# ===== Fallback for "/start" even if not detected as command =====
+@bot.message_handler(func=lambda m: (m.text or "").strip().lower() in ["start", "/start"])
+def _start_fallback(m):
+    try:
+        ensure_user(m.chat.id)
+        show_main_menu(m.chat.id)
+    except Exception as e:
+        print("start_fallback error:", e)
+
+# ========= Callbacks =========
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call):
     try:
@@ -635,7 +738,6 @@ def callbacks(call):
 
     if data == "lang_menu":
         mm = types.InlineKeyboardMarkup()
-        # أعلام مع أسماء اللغات
         mm.add(types.InlineKeyboardButton("العربية 🇸🇦", callback_data="set_lang_ar"),
                types.InlineKeyboardButton("English 🇬🇧", callback_data="set_lang_en"))
         mm.add(types.InlineKeyboardButton("Türkçe 🇹🇷", callback_data="set_lang_tr"),
@@ -646,10 +748,8 @@ def callbacks(call):
 
     if data.startswith("set_lang_"):
         code = data.split("_")[-1]
-        mapping = {"en":"en","ar":"ar","tr":"tr","es":"es","de":"de","ru":"ru"}
-        lang = mapping.get(code, "en")
+        lang = {"en":"en","ar":"ar","tr":"tr","es":"es","de":"de","ru":"ru"}.get(code, "en")
         set_lang(uid, lang)
-        # رسالة تأكيد حسب اللغة المختارة
         confirm = {
             "en": TEXT["en"]["lang_saved"],
             "ar": TEXT["ar"]["lang_saved"],
