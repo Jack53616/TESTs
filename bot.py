@@ -1,4 +1,3 @@
-# bot.py
 import os
 import json
 from datetime import datetime
@@ -14,7 +13,7 @@ USE_DB = bool(os.environ.get("DATABASE_URL"))
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
 
-# احصل على اسم البوت لإزالة المنشن من الأوامر
+# احصل على اسم البوت (مفيد لو في /cmd@BotName)
 BOT_USERNAME = ""
 try:
     me = bot.get_me()
@@ -22,7 +21,7 @@ try:
 except Exception as e:
     print("get_me error:", e)
 
-# ========= سجّل الأوامر (زر Commands) =========
+# ========= تسجيل الأوامر (زر Commands) =========
 try:
     bot.set_my_commands([
         telebot.types.BotCommand("start", "القائمة الرئيسية"),
@@ -43,7 +42,7 @@ try:
 except Exception as e:
     print("set_my_commands error:", e)
 
-# ========= Persistence (Files -> Postgres عبر db_kv) =========
+# ========= Persistence (ملف -> Postgres عبر db_kv) =========
 if USE_DB:
     from db_kv import init_db, get_json, set_json
     init_db()
@@ -106,10 +105,12 @@ def is_admin(user_id: int) -> bool:
 def is_staff(user_id: int) -> bool:
     return is_admin(user_id) or (int(user_id) in _load_staff_set())
 
-# ========= Normalize =========
+# ========= Normalize & Parse =========
 ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
+
 def norm_text(txt: str) -> str:
-    if not txt: return ""
+    if not txt:
+        return ""
     t = txt.strip()
     for ch in ZERO_WIDTH:
         t = t.replace(ch, "")
@@ -117,8 +118,8 @@ def norm_text(txt: str) -> str:
 
 def parse_command(message):
     """
-    يرجّع (cmd, args) مثل ("help", ""), ويشيل @BotName إن وجد.
-    يعتمد على entities لو متوفرة.
+    يرجّع (cmd, args) مثل ("help", "").
+    يعتمد على entities ويزيل @BotName إن وجد.
     """
     raw = norm_text(message.text or "")
     cmd_token = None
@@ -134,11 +135,7 @@ def parse_command(message):
         cmd_token = parts[0] if parts else ""
     if cmd_token.startswith("／"):
         cmd_token = "/" + cmd_token[1:]
-    if cmd_token.startswith("/"):
-        token = cmd_token[1:]
-    else:
-        token = cmd_token
-    # شيل المنشن
+    token = cmd_token[1:] if cmd_token.startswith("/") else cmd_token
     if "@" in token:
         token = token.split("@", 1)[0]
     cmd = token.lower()
@@ -174,11 +171,12 @@ def show_main_menu(chat_id: int):
     )
     bot.send_message(chat_id, text, reply_markup=markup)
 
-# ========= Router: كل النصوص تيجي لهون =========
+# ========= Router (كل النصوص) =========
 @bot.message_handler(content_types=['text'])
 def router(message):
     text_raw = message.text or ""
-    # لو مش أمر
+
+    # لو مش أمر: مرر للأدمن كتنبيه وانتهى
     if not text_raw.strip().startswith(("/", "／")):
         try:
             bot.send_message(ADMIN_ID, f"📩 رسالة من {message.from_user.id}:\n{text_raw}")
@@ -189,7 +187,7 @@ def router(message):
     cmd, args = parse_command(message)
     print("ROUTER:", cmd, "| ARGS:", repr(args), "| FROM:", message.from_user.id)
 
-    # عام
+    # عامة
     if cmd == "ping":
         return bot.reply_to(message, "pong ✅")
 
@@ -217,13 +215,17 @@ def router(message):
             "— أوامر المدير —",
             "/setbalance <user_id> <amount> - ضبط رصيد",
             "/broadcast <نص> - إرسال للكل",
-            "/promote <user_id> - ترقية لطاقم",
+            "/promote <user_id> - ترقية طاقم",
             "/demote <user_id> - إزالة من الطاقم",
         ]
         lines = base[:]
         if is_staff(uid): lines += [""] + staff_cmds
         if is_admin(uid): lines += [""] + admin_cmds
         return bot.reply_to(message, "\n".join(lines))
+
+    if cmd == "mystatus":
+        uid = message.from_user.id
+        return bot.reply_to(message, f"Your ID: {uid}\nis_admin: {is_admin(uid)}\nis_staff: {is_staff(uid)}")
 
     if cmd == "id":
         return bot.reply_to(message, f"🆔 آيديك: {message.from_user.id}")
@@ -337,9 +339,16 @@ def router(message):
         else:
             return bot.reply_to(message, "هذا المستخدم ليس ضمن الطاقم.")
 
-    if cmd == "mystatus":
-        uid = message.from_user.id
-        return bot.reply_to(message, f"Your ID: {uid}\nis_admin: {is_admin(uid)}\nis_staff: {is_staff(uid)}")
+# ========= تمرير أوامر TeleBot لنفس الراوتر (ضمان مزدوج) =========
+@bot.message_handler(commands=[
+    "start","help","id","balance","daily","withdraw","mystatus",
+    "addbalance","setdaily","setbalance","broadcast","promote","demote","ping"
+])
+def _commands_passthrough(message):
+    try:
+        router(message)
+    except Exception as e:
+        print("passthrough error:", e)
 
 # ========= Callback Handlers =========
 @bot.callback_query_handler(func=lambda call: True)
