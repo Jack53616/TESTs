@@ -14,7 +14,15 @@ USE_DB = bool(os.environ.get("DATABASE_URL"))
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
 
-# ========= سجّل الأوامر (يظهر زر Commands) =========
+# احصل على اسم البوت لإزالة المنشن من الأوامر
+BOT_USERNAME = ""
+try:
+    me = bot.get_me()
+    BOT_USERNAME = (me.username or "").lower()
+except Exception as e:
+    print("get_me error:", e)
+
+# ========= سجّل الأوامر (زر Commands) =========
 try:
     bot.set_my_commands([
         telebot.types.BotCommand("start", "القائمة الرئيسية"),
@@ -100,14 +108,42 @@ def is_staff(user_id: int) -> bool:
 
 # ========= Normalize =========
 ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
-def norm_cmd(txt: str) -> str:
-    if not txt:
-        return ""
+def norm_text(txt: str) -> str:
+    if not txt: return ""
     t = txt.strip()
     for ch in ZERO_WIDTH:
         t = t.replace(ch, "")
-    t = t.replace("／", "/")  # سلاش بديل
-    return t
+    return t.replace("／", "/")  # سلاش بديل
+
+def parse_command(message):
+    """
+    يرجّع (cmd, args) مثل ("help", ""), ويشيل @BotName إن وجد.
+    يعتمد على entities لو متوفرة.
+    """
+    raw = norm_text(message.text or "")
+    cmd_token = None
+    try:
+        for ent in (message.entities or []):
+            if ent.type == "bot_command":
+                cmd_token = raw[ent.offset: ent.offset + ent.length]
+                break
+    except Exception:
+        pass
+    if not cmd_token:
+        parts = raw.split()
+        cmd_token = parts[0] if parts else ""
+    if cmd_token.startswith("／"):
+        cmd_token = "/" + cmd_token[1:]
+    if cmd_token.startswith("/"):
+        token = cmd_token[1:]
+    else:
+        token = cmd_token
+    # شيل المنشن
+    if "@" in token:
+        token = token.split("@", 1)[0]
+    cmd = token.lower()
+    args = raw[len(cmd_token):].strip()
+    return cmd, args
 
 # ========= Helpers & UI =========
 def ensure_user(chat_id: int) -> str:
@@ -138,31 +174,30 @@ def show_main_menu(chat_id: int):
     )
     bot.send_message(chat_id, text, reply_markup=markup)
 
-# ========= Router: كل الأوامر من هون فقط =========
+# ========= Router: كل النصوص تيجي لهون =========
 @bot.message_handler(content_types=['text'])
 def router(message):
     text_raw = message.text or ""
     # لو مش أمر
     if not text_raw.strip().startswith(("/", "／")):
-        # مررها للأدمن كتنبيه
         try:
             bot.send_message(ADMIN_ID, f"📩 رسالة من {message.from_user.id}:\n{text_raw}")
         except Exception as e:
             print("forward error:", e)
         return
 
-    t = norm_cmd(text_raw)
-    print("ROUTER:", repr(t), "from", message.from_user.id)
+    cmd, args = parse_command(message)
+    print("ROUTER:", cmd, "| ARGS:", repr(args), "| FROM:", message.from_user.id)
 
-    # أوامر عامة
-    if t == "/ping":
+    # عام
+    if cmd == "ping":
         return bot.reply_to(message, "pong ✅")
 
-    if t == "/start":
+    if cmd == "start":
         ensure_user(message.chat.id)
         return show_main_menu(message.chat.id)
 
-    if t == "/help":
+    if cmd == "help":
         uid = message.from_user.id
         base = [
             "🛠 الأوامر المتاحة:",
@@ -190,24 +225,23 @@ def router(message):
         if is_admin(uid): lines += [""] + admin_cmds
         return bot.reply_to(message, "\n".join(lines))
 
-    if t == "/id":
+    if cmd == "id":
         return bot.reply_to(message, f"🆔 آيديك: {message.from_user.id}")
 
-    if t == "/balance":
+    if cmd == "balance":
         uid = ensure_user(message.chat.id)
         users = load_json("users.json") or {}
         bal = users.get(uid, {}).get("balance", 0)
         return bot.reply_to(message, f"💰 رصيدك الحالي: {bal}$")
 
-    if t == "/daily":
+    if cmd == "daily":
         daily = load_json("daily_trade.txt") or "لا توجد صفقة يومية حالياً."
         return bot.reply_to(message, f"📈 صفقة اليوم:\n{daily if isinstance(daily, str) else str(daily)}")
 
-    if t.startswith("/withdraw"):
-        parts = t.split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip().lstrip("+").isdigit():
+    if cmd == "withdraw":
+        if not args or not args.lstrip("+").isdigit():
             return bot.reply_to(message, "❌ الصيغة: /withdraw 50")
-        amount = int(parts[1].strip())
+        amount = int(args)
         if amount <= 0:
             return bot.reply_to(message, "❌ المبلغ غير صالح.")
         uid = ensure_user(message.chat.id)
@@ -228,23 +262,22 @@ def router(message):
         save_json("withdraw_requests.json", withdraw_requests)
         return bot.reply_to(message, f"✅ تم إنشاء طلب السحب #{req_id} بقيمة {amount}$.")
 
-    # أوامر Staff/Admin
-    if t.startswith("/setdaily"):
+    # Staff/Admin
+    if cmd == "setdaily":
         if not is_staff(message.from_user.id):
             return
-        parts = t.split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
+        if not args:
             return bot.reply_to(message, "❌ اكتب النص: /setdaily <النص>")
-        save_json("daily_trade.txt", parts[1])
+        save_json("daily_trade.txt", args)
         return bot.reply_to(message, "تم تحديث صفقة اليوم ✅")
 
-    if t.startswith("/addbalance"):
+    if cmd == "addbalance":
         if not is_staff(message.from_user.id):
             return
-        parts = t.split()
-        if len(parts) != 3 or (not parts[1].isdigit()) or (not parts[2].lstrip("-").isdigit()):
+        parts = args.split()
+        if len(parts) != 2 or (not parts[0].isdigit()) or (not parts[1].lstrip("-").isdigit()):
             return bot.reply_to(message, "❌ الاستخدام: /addbalance <user_id> <amount>")
-        uid_str, amount_str = parts[1], parts[2]
+        uid_str, amount_str = parts
         amount = int(amount_str)
         users = load_json("users.json") or {}
         users.setdefault(uid_str, {"balance": 0})
@@ -252,13 +285,13 @@ def router(message):
         save_json("users.json", users)
         return bot.reply_to(message, f"تم إضافة {amount}$ للمستخدم {uid_str}. الرصيد الجديد: {users[uid_str]['balance']}$")
 
-    if t.startswith("/setbalance"):
+    if cmd == "setbalance":
         if not is_admin(message.from_user.id):
             return
-        parts = t.split()
-        if len(parts) != 3 or (not parts[1].isdigit()) or (not parts[2].lstrip("-").isdigit()):
+        parts = args.split()
+        if len(parts) != 2 or (not parts[0].isdigit()) or (not parts[1].lstrip("-").isdigit()):
             return bot.reply_to(message, "❌ الاستخدام: /setbalance <user_id> <amount>")
-        uid_str, amount_str = parts[1], parts[2]
+        uid_str, amount_str = parts
         amount = int(amount_str)
         users = load_json("users.json") or {}
         users.setdefault(uid_str, {"balance": 0})
@@ -266,14 +299,13 @@ def router(message):
         save_json("users.json", users)
         return bot.reply_to(message, f"تم ضبط رصيد المستخدم {uid_str} إلى {amount}$.")
 
-    if t.startswith("/broadcast"):
+    if cmd == "broadcast":
         if not is_admin(message.from_user.id):
             return
-        parts = t.split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
+        if not args:
             return bot.reply_to(message, "❌ اكتب الرسالة: /broadcast <النص>")
         users = load_json("users.json") or {}
-        text = parts[1]
+        text = args
         sent = 0
         for uid in list(users.keys()):
             try:
@@ -283,23 +315,21 @@ def router(message):
                 pass
         return bot.reply_to(message, f"تم الإرسال إلى {sent} مستخدم.")
 
-    if t.startswith("/promote"):
+    if cmd == "promote":
         if not is_admin(message.from_user.id):
             return
-        parts = t.split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip().isdigit():
+        if not args or (not args.isdigit()):
             return bot.reply_to(message, "❌ الاستخدام: /promote <user_id>")
-        uid = int(parts[1].strip())
+        uid = int(args)
         s = _load_staff_set(); s.add(uid); _save_staff_set(s)
         return bot.reply_to(message, f"✅ تمت ترقية {uid} إلى طاقم (staff).")
 
-    if t.startswith("/demote"):
+    if cmd == "demote":
         if not is_admin(message.from_user.id):
             return
-        parts = t.split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip().isdigit():
+        if not args or (not args.isdigit()):
             return bot.reply_to(message, "❌ الاستخدام: /demote <user_id>")
-        uid = int(parts[1].strip())
+        uid = int(args)
         s = _load_staff_set()
         if uid in s:
             s.remove(uid); _save_staff_set(s)
@@ -307,19 +337,16 @@ def router(message):
         else:
             return bot.reply_to(message, "هذا المستخدم ليس ضمن الطاقم.")
 
-    if t == "/mystatus":
+    if cmd == "mystatus":
         uid = message.from_user.id
         return bot.reply_to(message, f"Your ID: {uid}\nis_admin: {is_admin(uid)}\nis_staff: {is_staff(uid)}")
-
-    if t == "/unknown":
-        return bot.reply_to(message, "❓ أمر غير معروف.")
 
 # ========= Callback Handlers =========
 @bot.callback_query_handler(func=lambda call: True)
 def all_callbacks(call):
     try: bot.answer_callback_query(call.id)
     except Exception: pass
-    data = call.data or ""
+    data = (call.data or "")
     print("CALLBACK:", data, "from", call.from_user.id)
 
     if data == "daily_trade":
@@ -457,7 +484,7 @@ def process_custom_withdraw(message):
     users.setdefault(uid, {"balance": 0})
     balance = users.get(uid, {}).get("balance", 0)
     try:
-        amount = int(norm_cmd(message.text))
+        amount = int(norm_text(message.text))
         if amount < 10:
             bot.send_message(message.chat.id, "❌ الحد الأدنى 10$.")
         elif balance >= amount:
