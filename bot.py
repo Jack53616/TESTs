@@ -494,7 +494,6 @@ def register_commands():
         types.BotCommand("promote","ADMIN: promote"),
         types.BotCommand("demote","ADMIN: demote"),
     ]
-    # Default per-language (users see only public)
     for lc in ["en","ar","tr","es","de","ru"]:
         try:
             bot.set_my_commands(public_cmds[lc], scope=types.BotCommandScopeDefault(), language_code=lc)
@@ -504,7 +503,6 @@ def register_commands():
         bot.set_my_commands(public_cmds["en"], scope=types.BotCommandScopeDefault())
     except Exception as e:
         print("set_my_commands default fallback error:", e)
-    # Admin chat scope (public + admin)
     for lc in ["en","ar","tr","es","de","ru"]:
         try:
             bot.set_my_commands(public_cmds[lc] + admin_extra, scope=types.BotCommandScopeChat(chat_id=ADMIN_ID), language_code=lc)
@@ -560,7 +558,6 @@ def router(message):
     cmd, args = parse_command(message)
     print("ROUTER:", cmd, "| ARGS:", repr(args), "| FROM:", uid)
 
-    # General
     if cmd == "start":
         ensure_user(message.chat.id)
         return show_main_menu(message.chat.id)
@@ -706,7 +703,7 @@ def router(message):
         else:
             return bot.reply_to(message, "not staff")
 
-# ===== Force-pass commands to router (extra safety) =====
+# ===== Extra safety: pass commands to router =====
 @bot.message_handler(commands=[
     "start","help","id","balance","daily","withdraw","mystatus",
     "addbalance","setdaily","setbalance","broadcast","promote","demote"
@@ -717,8 +714,8 @@ def _commands_passthrough(message):
     except Exception as e:
         print("passthrough error:", e)
 
-# ===== Fallback for "/start" even if not detected as command =====
-@bot.message_handler(func=lambda m: (m.text or "").strip().lower() in ["start", "/start"])
+# ===== Robust fallback for "/start" (even if not entity) =====
+@bot.message_handler(func=lambda m: (m.text or "").strip().lower().startswith("start"))
 def _start_fallback(m):
     try:
         ensure_user(m.chat.id)
@@ -735,6 +732,7 @@ def callbacks(call):
         pass
     data = call.data or ""
     uid = str(call.from_user.id)
+    print("CALLBACK:", data, "FROM:", uid)
 
     if data == "lang_menu":
         mm = types.InlineKeyboardMarkup()
@@ -744,7 +742,14 @@ def callbacks(call):
                types.InlineKeyboardButton("Español 🇪🇸", callback_data="set_lang_es"))
         mm.add(types.InlineKeyboardButton("Deutsch 🇩🇪", callback_data="set_lang_de"),
                types.InlineKeyboardButton("Русский 🇷🇺", callback_data="set_lang_ru"))
-        return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=mm)
+        # Edit/Send menu neatly
+        try:
+            bot.edit_message_text(TEXT[get_lang(uid)]["lang_menu_title"],
+                                  call.message.chat.id, call.message.message_id,
+                                  reply_markup=mm)
+        except Exception:
+            bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=mm)
+        return
 
     if data.startswith("set_lang_"):
         code = data.split("_")[-1]
@@ -758,15 +763,30 @@ def callbacks(call):
             "de": TEXT["de"]["lang_saved"],
             "ru": TEXT["ru"]["lang_saved"],
         }[lang]
-        bot.send_message(call.message.chat.id, confirm)
-        return show_main_menu(call.message.chat.id)
+        # 1) نحط تأكيد مكان الرسالة الحاليّة
+        try:
+            bot.edit_message_text(confirm, call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, confirm)
+        # 2) نرجّع القائمة الرئيسية فورًا
+        try:
+            show_main_menu(call.message.chat.id)
+        except Exception as e:
+            print("menu_after_lang error:", e)
+        return
 
     if data == "daily_trade":
         daily = load_json("daily_trade.txt") or TEXT[get_lang(uid)]["daily_none"]
         mm = types.InlineKeyboardMarkup()
         mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
                types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, daily if isinstance(daily, str) else str(daily), reply_markup=mm)
+        try:
+            bot.edit_message_text(daily if isinstance(daily, str) else str(daily),
+                                  call.message.chat.id, call.message.message_id,
+                                  reply_markup=mm)
+        except Exception:
+            bot.send_message(call.message.chat.id, daily if isinstance(daily, str) else str(daily), reply_markup=mm)
+        return
 
     if data == "withdraw_menu":
         mm = types.InlineKeyboardMarkup()
@@ -774,7 +794,13 @@ def callbacks(call):
             mm.add(types.InlineKeyboardButton(f"{amount}$", callback_data=f"withdraw_{amount}"))
         mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"))
         mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["choose_withdraw_amount"], reply_markup=mm)
+        try:
+            bot.edit_message_text(TEXT[get_lang(uid)]["choose_withdraw_amount"],
+                                  call.message.chat.id, call.message.message_id,
+                                  reply_markup=mm)
+        except Exception:
+            bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["choose_withdraw_amount"], reply_markup=mm)
+        return
 
     if data == "withdraw_status":
         withdraw_requests = load_json("withdraw_requests.json") or {}
@@ -786,7 +812,11 @@ def callbacks(call):
                 found = True
         mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
         msg = TEXT[get_lang(uid)]["requests_waiting"] if found else TEXT[get_lang(uid)]["no_requests"]
-        return bot.send_message(call.message.chat.id, msg, reply_markup=mm)
+        try:
+            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=mm)
+        except Exception:
+            bot.send_message(call.message.chat.id, msg, reply_markup=mm)
+        return
 
     if data.startswith("withdraw_") and data not in ["withdraw_status", "withdraw_custom"]:
         users = load_json("users.json") or {}
@@ -797,9 +827,16 @@ def callbacks(call):
             users[uid]["balance"] = balance - amount
             save_json("users.json", users)
             _add_req_and_notify(uid, amount)
-            return bot.send_message(call.message.chat.id, "✅")
+            try:
+                bot.answer_callback_query(call.id, "✅")
+            except Exception:
+                pass
         else:
-            return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["not_enough"])
+            try:
+                bot.answer_callback_query(call.id, TEXT[get_lang(uid)]["not_enough"], show_alert=True)
+            except Exception:
+                bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["not_enough"])
+        return
 
     if data == "withdraw_custom":
         bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["enter_custom_withdraw"])
@@ -817,24 +854,43 @@ def callbacks(call):
             req["status"] = "ملغي"
             save_json("withdraw_requests.json", withdraw_requests)
             save_json("users.json", users)
-            return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["canceled"].format(amount=amount))
+            try:
+                bot.answer_callback_query(call.id, TEXT[get_lang(uid)]["canceled"].format(amount=amount), show_alert=True)
+            except Exception:
+                bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["canceled"].format(amount=amount))
         else:
-            return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["cannot_cancel"])
+            try:
+                bot.answer_callback_query(call.id, TEXT[get_lang(uid)]["cannot_cancel"], show_alert=True)
+            except Exception:
+                bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["cannot_cancel"])
+        return
 
     if data == "stats":
         trades = load_json("trades.json") or {}
         user_trades = trades.get(uid, [])
         if not user_trades:
-            return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["stats_none"])
+            try:
+                bot.edit_message_text(TEXT[get_lang(uid)]["stats_none"], call.message.chat.id, call.message.message_id)
+            except Exception:
+                bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["stats_none"])
+            return
         total = 0
         txt = TEXT[get_lang(uid)]["stats_header"]
         for i, t in enumerate(user_trades, 1):
             txt += f"{i}- {t['date']} | {t['profit']}$\n"
             total += t['profit']
         txt += TEXT[get_lang(uid)]["stats_total"].format(total=total)
-        return bot.send_message(call.message.chat.id, txt)
+        try:
+            bot.edit_message_text(txt, call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, txt)
+        return
 
     if data == "go_back":
+        try:
+            bot.edit_message_text("↩️", call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
         return show_main_menu(call.message.chat.id)
 
 def _add_req_and_notify(uid: str, amount: int):
@@ -876,8 +932,11 @@ app = Flask(__name__)
 def index():
     return "OK", 200
 
-@app.route(f"/{API_TOKEN}", methods=["POST"])
+# قبول GET لتفادي 405، وPOST لمعالجة التحديثات
+@app.route(f"/{API_TOKEN}", methods=["GET","POST"])
 def webhook():
+    if request.method == "GET":
+        return "OK", 200
     try:
         json_str = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_str)
