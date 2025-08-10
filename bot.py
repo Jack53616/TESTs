@@ -7,16 +7,36 @@ import telebot
 from telebot import types
 
 # ========= ENV =========
-API_TOKEN = os.environ.get("BOT_TOKEN")  # لازم تضيفه في Render
+API_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1262317603"))
 WEBHOOK_BASE = os.environ.get("WEBHOOK_URL")  # مثال: https://your-app.onrender.com
 USE_DB = bool(os.environ.get("DATABASE_URL"))
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
 
+# ========= سجّل الأوامر (يظهر زر Commands) =========
+try:
+    bot.set_my_commands([
+        telebot.types.BotCommand("start", "القائمة الرئيسية"),
+        telebot.types.BotCommand("help", "قائمة الأوامر"),
+        telebot.types.BotCommand("id", "إظهار آيديك"),
+        telebot.types.BotCommand("balance", "رصيدك"),
+        telebot.types.BotCommand("daily", "صفقة اليوم"),
+        telebot.types.BotCommand("withdraw", "طلب سحب"),
+        telebot.types.BotCommand("mystatus", "فحص صلاحياتي"),
+        telebot.types.BotCommand("addbalance", "STAFF: إضافة رصيد"),
+        telebot.types.BotCommand("setdaily", "STAFF: ضبط صفقة اليوم"),
+        telebot.types.BotCommand("setbalance", "ADMIN: ضبط رصيد"),
+        telebot.types.BotCommand("broadcast", "ADMIN: بث"),
+        telebot.types.BotCommand("promote", "ADMIN: ترقية طاقم"),
+        telebot.types.BotCommand("demote", "ADMIN: إزالة طاقم"),
+        telebot.types.BotCommand("ping", "اختبار سريع"),
+    ])
+except Exception as e:
+    print("set_my_commands error:", e)
+
 # ========= Persistence (Files -> Postgres عبر db_kv) =========
 if USE_DB:
-    # يتطلّب وجود db_kv.py مرفوع مع المشروع
     from db_kv import init_db, get_json, set_json
     init_db()
 
@@ -78,38 +98,16 @@ def is_admin(user_id: int) -> bool:
 def is_staff(user_id: int) -> bool:
     return is_admin(user_id) or (int(user_id) in _load_staff_set())
 
-# ========= Normalize & Router (يحل مشكلة الأوامر اللي ما تنمسك) =========
+# ========= Normalize =========
 ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
-
 def norm_cmd(txt: str) -> str:
     if not txt:
         return ""
     t = txt.strip()
     for ch in ZERO_WIDTH:
         t = t.replace(ch, "")
-    # بدائل سلاش غريبة
-    t = t.replace("／", "/")
+    t = t.replace("／", "/")  # سلاش بديل
     return t
-
-@bot.message_handler(func=lambda m: bool(getattr(m, "text", "")) and m.text.strip().startswith(("/", "／")))
-def cmd_router(message):
-    t = norm_cmd(message.text)
-    print("ROUTER GOT:", repr(t))
-    if t == "/help": return cmd_help(message)
-    if t == "/start": return cmd_start(message)
-    if t == "/id": return cmd_id(message)
-    if t == "/balance": return cmd_balance(message)
-    if t.startswith("/daily"): return cmd_daily(message)
-    if t.startswith("/withdraw"): return cmd_withdraw(message)
-    if t.startswith("/addbalance"): return cmd_addbalance(message)
-    if t.startswith("/setdaily"): return cmd_setdaily(message)
-    if t.startswith("/setbalance"): return cmd_setbalance(message)
-    if t.startswith("/broadcast"): return cmd_broadcast(message)
-    if t.startswith("/promote"): return cmd_promote(message)
-    if t.startswith("/demote"): return cmd_demote(message)
-    if t.startswith("/mystatus"): return cmd_mystatus(message)
-    # لو ما طابقت شي، خليه يمر لباقي الهاندلرز (بس غالباً ما يلزم)
-    return
 
 # ========= Helpers & UI =========
 def ensure_user(chat_id: int) -> str:
@@ -140,186 +138,187 @@ def show_main_menu(chat_id: int):
     )
     bot.send_message(chat_id, text, reply_markup=markup)
 
-# ========= Commands (User) =========
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    print("CMD /start by", message.from_user.id)
-    ensure_user(message.chat.id)
-    show_main_menu(message.chat.id)
-
-@bot.message_handler(commands=["help"])
-def cmd_help(message):
-    print("CMD /help by", message.from_user.id)
-    uid = message.from_user.id
-    base = [
-        "🛠 الأوامر المتاحة:",
-        "/start - القائمة الرئيسية",
-        "/id - يظهر آيديك",
-        "/balance - يظهر رصيدك",
-        "/daily - صفقة اليوم",
-        "/withdraw <amount> - طلب سحب",
-        "/mystatus - فحص صلاحياتي",
-    ]
-    staff_cmds = [
-        "— أوامر الطاقم —",
-        "/addbalance <user_id> <amount> - زيادة رصيد",
-        "/setdaily <نص الصفقة> - ضبط صفقة اليوم",
-    ]
-    admin_cmds = [
-        "— أوامر المدير —",
-        "/setbalance <user_id> <amount> - ضبط رصيد",
-        "/broadcast <نص> - إرسال للكل",
-        "/promote <user_id> - ترقية لطاقم",
-        "/demote <user_id> - إزالة من الطاقم",
-    ]
-    lines = base[:]
-    if is_staff(uid): lines += [""] + staff_cmds
-    if is_admin(uid): lines += [""] + admin_cmds
-    bot.reply_to(message, "\n".join(lines))
-
-@bot.message_handler(commands=["mystatus"])
-def cmd_mystatus(message):
-    uid = message.from_user.id
-    bot.reply_to(message, f"Your ID: {uid}\nis_admin: {is_admin(uid)}\nis_staff: {is_staff(uid)}")
-
-@bot.message_handler(commands=["id"])
-def cmd_id(message):
-    bot.reply_to(message, f"🆔 آيديك: {message.from_user.id}")
-
-@bot.message_handler(commands=["balance"])
-def cmd_balance(message):
-    uid = ensure_user(message.chat.id)
-    users = load_json("users.json") or {}
-    bal = users.get(uid, {}).get("balance", 0)
-    bot.reply_to(message, f"💰 رصيدك الحالي: {bal}$")
-
-@bot.message_handler(commands=["daily"])
-def cmd_daily(message):
-    daily = load_json("daily_trade.txt") or "لا توجد صفقة يومية حالياً."
-    bot.reply_to(message, f"📈 صفقة اليوم:\n{daily if isinstance(daily, str) else str(daily)}")
-
-@bot.message_handler(commands=["withdraw"])
-def cmd_withdraw(message):
-    parts = norm_cmd(message.text).split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().lstrip("+").isdigit():
-        bot.reply_to(message, "اكتب المبلغ: /withdraw 50")
-        return
-    amount = int(parts[1].strip())
-    if amount <= 0:
-        bot.reply_to(message, "المبلغ غير صالح.")
-        return
-    uid = ensure_user(message.chat.id)
-    users = load_json("users.json") or {}
-    bal = users.get(uid, {}).get("balance", 0)
-    if bal < amount:
-        bot.reply_to(message, f"رصيدك غير كافٍ. رصيدك: {bal}$")
-        return
-    users[uid]["balance"] = bal - amount
-    save_json("users.json", users)
-    withdraw_requests = load_json("withdraw_requests.json") or {}
-    req_id = str(len(withdraw_requests) + 1)
-    withdraw_requests[req_id] = {
-        "user_id": uid,
-        "amount": amount,
-        "status": "بانتظار الموافقة",
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    save_json("withdraw_requests.json", withdraw_requests)
-    bot.reply_to(message, f"✅ تم إنشاء طلب السحب #{req_id} بقيمة {amount}$.")
-
-# ========= Commands (Staff/Admin) =========
-@bot.message_handler(commands=["addbalance"])
-def cmd_addbalance(message):
-    if not is_staff(message.from_user.id): return
-    parts = norm_cmd(message.text).split()
-    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].lstrip("-").isdigit():
-        bot.reply_to(message, "الاستخدام: /addbalance <user_id> <amount>")
-        return
-    uid_str, amount_str = parts[1], parts[2]
-    amount = int(amount_str)
-    users = load_json("users.json") or {}
-    users.setdefault(uid_str, {"balance": 0})
-    users[uid_str]["balance"] = users[uid_str].get("balance", 0) + amount
-    save_json("users.json", users)
-    bot.reply_to(message, f"تم إضافة {amount}$ للمستخدم {uid_str}. الرصيد الجديد: {users[uid_str]['balance']}$")
-
-@bot.message_handler(commands=["setdaily"])
-def cmd_setdaily(message):
-    if not is_staff(message.from_user.id): return
-    parts = norm_cmd(message.text).split(maxsplit=1)
-    if len(parts) < 2:
-        bot.reply_to(message, "اكتب نص الصفقة: /setdaily <النص>")
-        return
-    save_json("daily_trade.txt", parts[1])
-    bot.reply_to(message, "تم تحديث صفقة اليوم ✅")
-
-@bot.message_handler(commands=["setbalance"])
-def cmd_setbalance(message):
-    if not is_admin(message.from_user.id): return
-    parts = norm_cmd(message.text).split()
-    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].lstrip("-").isdigit():
-        bot.reply_to(message, "الاستخدام: /setbalance <user_id> <amount>")
-        return
-    uid_str, amount_str = parts[1], parts[2]
-    amount = int(amount_str)
-    users = load_json("users.json") or {}
-    users.setdefault(uid_str, {"balance": 0})
-    users[uid_str]["balance"] = amount
-    save_json("users.json", users)
-    bot.reply_to(message, f"تم ضبط رصيد المستخدم {uid_str} إلى {amount}$.")
-
-@bot.message_handler(commands=["broadcast"])
-def cmd_broadcast(message):
-    if not is_admin(message.from_user.id): return
-    parts = norm_cmd(message.text).split(maxsplit=1)
-    if len(parts) < 2:
-        bot.reply_to(message, "اكتب الرسالة: /broadcast <النص>")
-        return
-    users = load_json("users.json") or {}
-    text = parts[1]
-    sent = 0
-    for uid in list(users.keys()):
+# ========= Router: كل الأوامر من هون فقط =========
+@bot.message_handler(content_types=['text'])
+def router(message):
+    text_raw = message.text or ""
+    # لو مش أمر
+    if not text_raw.strip().startswith(("/", "／")):
+        # مررها للأدمن كتنبيه
         try:
-            bot.send_message(int(uid), text)
-            sent += 1
-        except Exception:
-            pass
-    bot.reply_to(message, f"تم الإرسال إلى {sent} مستخدم.")
-
-@bot.message_handler(commands=["promote"])
-def cmd_promote(message):
-    if not is_admin(message.from_user.id): return
-    parts = norm_cmd(message.text).split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        bot.reply_to(message, "الاستخدام: /promote <user_id>")
+            bot.send_message(ADMIN_ID, f"📩 رسالة من {message.from_user.id}:\n{text_raw}")
+        except Exception as e:
+            print("forward error:", e)
         return
-    uid = int(parts[1].strip())
-    s = _load_staff_set(); s.add(uid); _save_staff_set(s)
-    bot.reply_to(message, f"✅ تمت ترقية {uid} إلى طاقم (staff).")
 
-@bot.message_handler(commands=["demote"])
-def cmd_demote(message):
-    if not is_admin(message.from_user.id): return
-    parts = norm_cmd(message.text).split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        bot.reply_to(message, "الاستخدام: /demote <user_id>")
-        return
-    uid = int(parts[1].strip())
-    s = _load_staff_set()
-    if uid in s:
-        s.remove(uid); _save_staff_set(s)
-        bot.reply_to(message, f"✅ تمت إزالة {uid} من الطاقم.")
-    else:
-        bot.reply_to(message, "هذا المستخدم ليس ضمن الطاقم.")
+    t = norm_cmd(text_raw)
+    print("ROUTER:", repr(t), "from", message.from_user.id)
 
-# ========= Callback Handlers (Buttons) =========
+    # أوامر عامة
+    if t == "/ping":
+        return bot.reply_to(message, "pong ✅")
+
+    if t == "/start":
+        ensure_user(message.chat.id)
+        return show_main_menu(message.chat.id)
+
+    if t == "/help":
+        uid = message.from_user.id
+        base = [
+            "🛠 الأوامر المتاحة:",
+            "/start - القائمة الرئيسية",
+            "/id - يظهر آيديك",
+            "/balance - يظهر رصيدك",
+            "/daily - صفقة اليوم",
+            "/withdraw <amount> - طلب سحب",
+            "/mystatus - فحص صلاحياتي",
+        ]
+        staff_cmds = [
+            "— أوامر الطاقم —",
+            "/addbalance <user_id> <amount> - زيادة رصيد",
+            "/setdaily <نص الصفقة> - ضبط صفقة اليوم",
+        ]
+        admin_cmds = [
+            "— أوامر المدير —",
+            "/setbalance <user_id> <amount> - ضبط رصيد",
+            "/broadcast <نص> - إرسال للكل",
+            "/promote <user_id> - ترقية لطاقم",
+            "/demote <user_id> - إزالة من الطاقم",
+        ]
+        lines = base[:]
+        if is_staff(uid): lines += [""] + staff_cmds
+        if is_admin(uid): lines += [""] + admin_cmds
+        return bot.reply_to(message, "\n".join(lines))
+
+    if t == "/id":
+        return bot.reply_to(message, f"🆔 آيديك: {message.from_user.id}")
+
+    if t == "/balance":
+        uid = ensure_user(message.chat.id)
+        users = load_json("users.json") or {}
+        bal = users.get(uid, {}).get("balance", 0)
+        return bot.reply_to(message, f"💰 رصيدك الحالي: {bal}$")
+
+    if t == "/daily":
+        daily = load_json("daily_trade.txt") or "لا توجد صفقة يومية حالياً."
+        return bot.reply_to(message, f"📈 صفقة اليوم:\n{daily if isinstance(daily, str) else str(daily)}")
+
+    if t.startswith("/withdraw"):
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().lstrip("+").isdigit():
+            return bot.reply_to(message, "❌ الصيغة: /withdraw 50")
+        amount = int(parts[1].strip())
+        if amount <= 0:
+            return bot.reply_to(message, "❌ المبلغ غير صالح.")
+        uid = ensure_user(message.chat.id)
+        users = load_json("users.json") or {}
+        bal = users.get(uid, {}).get("balance", 0)
+        if bal < amount:
+            return bot.reply_to(message, f"رصيدك غير كافٍ. رصيدك: {bal}$")
+        users[uid]["balance"] = bal - amount
+        save_json("users.json", users)
+        withdraw_requests = load_json("withdraw_requests.json") or {}
+        req_id = str(len(withdraw_requests) + 1)
+        withdraw_requests[req_id] = {
+            "user_id": uid,
+            "amount": amount,
+            "status": "بانتظار الموافقة",
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        save_json("withdraw_requests.json", withdraw_requests)
+        return bot.reply_to(message, f"✅ تم إنشاء طلب السحب #{req_id} بقيمة {amount}$.")
+
+    # أوامر Staff/Admin
+    if t.startswith("/setdaily"):
+        if not is_staff(message.from_user.id):
+            return
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            return bot.reply_to(message, "❌ اكتب النص: /setdaily <النص>")
+        save_json("daily_trade.txt", parts[1])
+        return bot.reply_to(message, "تم تحديث صفقة اليوم ✅")
+
+    if t.startswith("/addbalance"):
+        if not is_staff(message.from_user.id):
+            return
+        parts = t.split()
+        if len(parts) != 3 or (not parts[1].isdigit()) or (not parts[2].lstrip("-").isdigit()):
+            return bot.reply_to(message, "❌ الاستخدام: /addbalance <user_id> <amount>")
+        uid_str, amount_str = parts[1], parts[2]
+        amount = int(amount_str)
+        users = load_json("users.json") or {}
+        users.setdefault(uid_str, {"balance": 0})
+        users[uid_str]["balance"] = users[uid_str].get("balance", 0) + amount
+        save_json("users.json", users)
+        return bot.reply_to(message, f"تم إضافة {amount}$ للمستخدم {uid_str}. الرصيد الجديد: {users[uid_str]['balance']}$")
+
+    if t.startswith("/setbalance"):
+        if not is_admin(message.from_user.id):
+            return
+        parts = t.split()
+        if len(parts) != 3 or (not parts[1].isdigit()) or (not parts[2].lstrip("-").isdigit()):
+            return bot.reply_to(message, "❌ الاستخدام: /setbalance <user_id> <amount>")
+        uid_str, amount_str = parts[1], parts[2]
+        amount = int(amount_str)
+        users = load_json("users.json") or {}
+        users.setdefault(uid_str, {"balance": 0})
+        users[uid_str]["balance"] = amount
+        save_json("users.json", users)
+        return bot.reply_to(message, f"تم ضبط رصيد المستخدم {uid_str} إلى {amount}$.")
+
+    if t.startswith("/broadcast"):
+        if not is_admin(message.from_user.id):
+            return
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            return bot.reply_to(message, "❌ اكتب الرسالة: /broadcast <النص>")
+        users = load_json("users.json") or {}
+        text = parts[1]
+        sent = 0
+        for uid in list(users.keys()):
+            try:
+                bot.send_message(int(uid), text)
+                sent += 1
+            except Exception:
+                pass
+        return bot.reply_to(message, f"تم الإرسال إلى {sent} مستخدم.")
+
+    if t.startswith("/promote"):
+        if not is_admin(message.from_user.id):
+            return
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            return bot.reply_to(message, "❌ الاستخدام: /promote <user_id>")
+        uid = int(parts[1].strip())
+        s = _load_staff_set(); s.add(uid); _save_staff_set(s)
+        return bot.reply_to(message, f"✅ تمت ترقية {uid} إلى طاقم (staff).")
+
+    if t.startswith("/demote"):
+        if not is_admin(message.from_user.id):
+            return
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            return bot.reply_to(message, "❌ الاستخدام: /demote <user_id>")
+        uid = int(parts[1].strip())
+        s = _load_staff_set()
+        if uid in s:
+            s.remove(uid); _save_staff_set(s)
+            return bot.reply_to(message, f"✅ تمت إزالة {uid} من الطاقم.")
+        else:
+            return bot.reply_to(message, "هذا المستخدم ليس ضمن الطاقم.")
+
+    if t == "/mystatus":
+        uid = message.from_user.id
+        return bot.reply_to(message, f"Your ID: {uid}\nis_admin: {is_admin(uid)}\nis_staff: {is_staff(uid)}")
+
+    if t == "/unknown":
+        return bot.reply_to(message, "❓ أمر غير معروف.")
+
+# ========= Callback Handlers =========
 @bot.callback_query_handler(func=lambda call: True)
 def all_callbacks(call):
-    # نطبع لوج للتشخيص
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     data = call.data or ""
     print("CALLBACK:", data, "from", call.from_user.id)
 
@@ -470,18 +469,6 @@ def process_custom_withdraw(message):
             bot.send_message(message.chat.id, "❌ لا يوجد رصيد كافٍ.")
     except:
         bot.send_message(message.chat.id, "❌ أدخل رقم صحيح.")
-
-# ========= Catch-all (لا يمنع الأوامر) =========
-@bot.message_handler(func=lambda m: True)
-def any_text(message):
-    # لو رسالة فيها سلاش، خليه للراوتر
-    if message.text and message.text.strip().startswith(("/", "／")):
-        return
-    # مررها للأدمن كتنبيه
-    try:
-        bot.send_message(ADMIN_ID, f"📩 رسالة من {message.from_user.id}:\n{message.text}")
-    except Exception as e:
-        print("forward error:", e)
 
 # ========= Flask Webhook =========
 app = Flask(__name__)
