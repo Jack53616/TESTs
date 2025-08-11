@@ -456,6 +456,41 @@ def cmd_addbalance(message: types.Message):
     save_json("users.json", users)
     bot.reply_to(message, f"✅ New balance for {target}: {users[target]['balance']}$")
 
+
+# ---------- Fallback command router (handles weird slashes/RTL) ----------
+ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
+def norm_text(txt: str) -> str:
+    if not txt: return ""
+    t = txt.strip()
+    for ch in ZERO_WIDTH:
+        t = t.replace(ch, "")
+    return t.replace("／","/").replace("⁄","/")
+
+def dispatch_command(message: types.Message):
+    raw = norm_text(message.text or "")
+    cmd = raw.split()[0].lower()
+    log.info("DISPATCH raw=%r parsed_cmd=%s", raw, cmd)
+    if cmd in ("/start", "start"):
+        return cmd_start(message)
+    if cmd in ("/help", "help"):
+        return cmd_help(message)
+    if cmd in ("/id", "id"):
+        return cmd_id(message)
+    if cmd in ("/balance", "balance"):
+        return cmd_balance(message)
+    if cmd.startswith("/daily") or cmd=="daily":
+        return cmd_daily(message)
+    if cmd.startswith("/withdraw") or cmd=="withdraw":
+        return cmd_withdraw(message)
+    # ignore others
+    return
+
+@bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
+def any_command_like(message: types.Message):
+    try:
+        return dispatch_command(message)
+    except Exception as e:
+        log.error("fallback dispatch error: %s", e)
 # ---------- Webhook & Server ----------
 @app.get("/")
 def health():
