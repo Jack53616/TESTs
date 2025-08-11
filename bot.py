@@ -2,20 +2,19 @@
 """
 Telegram bot (Render-ready) — features:
 - i18n (ar/en/tr/es/fr)
-- Main menu: Daily / Withdraw / Withdrawal requests / Stats / Language / Deposit
+- Main menu: Daily / Withdraw / Withdrawal requests / Stats / Language / Deposit / Website / Support
 - Withdraw via buttons or /withdraw <amount>
 - Per-user stats (win/loss) with admin record mode and commands
 - Broadcast for admin
 - Non-command messages are relayed to admin
 - Storage: DB (db_kv.py) if DATABASE_URL, else JSON files
 - Fixes:
-  * T() param renamed
-  * Escaped <amount>, <text>, etc. for HTML parse mode
+  * Robust HTML escaping in help
   * __main__ runs Flask when WEBHOOK_URL is set (Render) to avoid polling conflict
 """
 import os, json, logging, html
 from datetime import datetime
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Optional
 from flask import Flask, request
 
 import telebot
@@ -26,11 +25,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("bot")
 
 # ---------- ENV ----------
-API_TOKEN    = os.getenv("BOT_TOKEN", "").strip()
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "").rstrip("/")
-ADMIN_ID     = int(os.getenv("ADMIN_ID", "1262317603"))
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-SUPPORT_USER = os.getenv("SUPPORT_USERNAME", "qlsupport").lstrip("@") or "qlsupport"
+API_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "").rstrip("/")
+ADMIN_ID      = int(os.getenv("ADMIN_ID", "1262317603"))
+DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
+SUPPORT_USER  = os.getenv("SUPPORT_USERNAME", "qlsupport").lstrip("@") or "qlsupport"
+WEBSITE_URL   = os.getenv("WEBSITE_URL", "").strip()  # ← ضع رابط موقعك هنا أو كمتغير بيئة
 
 if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -113,6 +113,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_stats": "📊 الإحصائيات",
         "btn_lang": "🌐 اللغة",
         "btn_deposit": "💳 الإيداع",
+        "btn_website": "🌍 موقعنا",
+        "btn_support": "📞 تواصل مع الدعم",
         "help_title": "🛠 الأوامر المتاحة:",
         "help_public": [
             "/start - القائمة الرئيسية",
@@ -142,6 +144,10 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_visa": "💳 فيزا",
         "deposit_msg": "لإتمام الدفع عبر {method}، يرجى التواصل مباشرة معنا. اضغط الزر أدناه:",
         "contact_us": "📩 تواصل معنا",
+        # website & support
+        "website_msg": "🔥 زر لزيارة موقعنا:",
+        "website_not_set": "ℹ️ لم يتم ضبط رابط الموقع بعد.",
+        "support_msg": "للتواصل مع الدعم اضغط الزر:",
         # stats i18n
         "stats_title": "📊 إحصائياتك",
         "stats_wins": "✅ الأرباح: {sum}$ (عدد: {count})",
@@ -159,9 +165,11 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "record_saved_loss": "✅ تم تسجيل خسارة -{amount}$ للمستخدم {uid} — {at}",
         "record_invalid_amount": "❌ الرجاء إرسال رقم صحيح (مثال: 10 أو 10-).",
         "userstats_header": "📊 إحصائيات المستخدم {uid}",
-        # balance link
+        # balance link / deduct
         "balance_linked_user": "✅ تم ربط البوت بحسابك التداول.\n💰 رصيدك الآن: {bal}$",
         "balance_updated_admin": "✅ تم تحديث رصيد {uid}. الرصيد الآن: {bal}$",
+        "balance_deduct_user": "🔻 تم خصم {amount}$ من رصيدك.\n💰 رصيدك الآن: {bal}$",
+        "balance_deduct_admin": "🔻 تم الخصم من رصيد {uid}. الرصيد الآن: {bal}$",
         # broadcast
         "broadcast_need_text": "❌ الصيغة: /broadcast النص",
         "broadcast_done": "📢 تم الإرسال: نجاح {ok} / فشل {fail}",
@@ -176,6 +184,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_stats": "📊 Stats",
         "btn_lang": "🌐 Language",
         "btn_deposit": "💳 Deposit",
+        "btn_website": "🌍 Website",
+        "btn_support": "📞 Contact support",
         "help_title": "🛠 Available commands:",
         "help_public": [
             "/start - Main menu",
@@ -204,6 +214,9 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_visa": "💳 Visa",
         "deposit_msg": "To complete payment via {method}, please contact us directly. Tap below:",
         "contact_us": "📩 Contact us",
+        "website_msg": "🔥 Tap to visit our website:",
+        "website_not_set": "ℹ️ Website URL is not set yet.",
+        "support_msg": "Tap below to contact support:",
         "stats_title": "📊 Your statistics",
         "stats_wins": "✅ Wins: {sum}$ (count: {count})",
         "stats_losses": "❌ Losses: {sum}$ (count: {count})",
@@ -221,6 +234,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "userstats_header": "📊 Stats for user {uid}",
         "balance_linked_user": "✅ The bot is linked to your trading account.\n💰 Your balance is now: {bal}$",
         "balance_updated_admin": "✅ Balance updated for {uid}. New balance: {bal}$",
+        "balance_deduct_user": "🔻 {amount}$ has been deducted.\n💰 Your new balance: {bal}$",
+        "balance_deduct_admin": "🔻 Deducted from {uid}. New balance: {bal}$",
         "broadcast_need_text": "❌ Usage: /broadcast text",
         "broadcast_done": "📢 Sent: OK {ok} / Fail {fail}",
         "relayed_to_admin": "📨 Your message was sent to the admin.",
@@ -233,6 +248,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_stats": "📊 İstatistikler",
         "btn_lang": "🌐 Dil",
         "btn_deposit": "💳 Yatırma",
+        "btn_website": "🌍 Web sitemiz",
+        "btn_support": "📞 Destek ile iletişim",
         "help_title": "🛠 Kullanılabilir komutlar:",
         "help_public": [
             "/start - Ana menü",
@@ -261,6 +278,9 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_visa": "💳 Visa",
         "deposit_msg": "{method} ile ödeme için lütfen doğrudan bizimle iletişime geçin. Aşağıya dokunun:",
         "contact_us": "📩 Bizimle iletişim",
+        "website_msg": "🔥 Web sitemizi ziyaret etmek için dokunun:",
+        "website_not_set": "ℹ️ Website URL henüz ayarlı değil.",
+        "support_msg": "Destek ile iletişim için aşağı dokunun:",
         "stats_title": "📊 İstatistiklerin",
         "stats_wins": "✅ Kazançlar: {sum}$ (adet: {count})",
         "stats_losses": "❌ Kayıplar: {sum}$ (adet: {count})",
@@ -278,6 +298,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "userstats_header": "📊 {uid} kullanıcısının istatistikleri",
         "balance_linked_user": "✅ Bot, işlem hesabınıza bağlandı.\n💰 Güncel bakiyeniz: {bal}$",
         "balance_updated_admin": "✅ {uid} için bakiye güncellendi. Yeni bakiye: {bal}$",
+        "balance_deduct_user": "🔻 Bakiyenizden {amount}$ düşüldü.\n💰 Yeni bakiyeniz: {bal}$",
+        "balance_deduct_admin": "🔻 {uid} kullanıcısından düşüldü. Yeni bakiye: {bal}$",
         "broadcast_need_text": "❌ Kullanım: /broadcast metin",
         "broadcast_done": "📢 Gönderildi: Başarılı {ok} / Başarısız {fail}",
         "relayed_to_admin": "📨 Mesajınız yöneticiye gönderildi.",
@@ -290,6 +312,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_stats": "📊 Estadísticas",
         "btn_lang": "🌐 Idioma",
         "btn_deposit": "💳 Depósito",
+        "btn_website": "🌍 Sitio web",
+        "btn_support": "📞 Contactar soporte",
         "help_title": "🛠 Comandos disponibles:",
         "help_public": [
             "/start - Menú principal",
@@ -316,8 +340,11 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_bank": "🏦 Transferencia bancaria",
         "deposit_mc": "💳 Mastercard",
         "deposit_visa": "💳 Visa",
-        "deposit_msg": "Para completar el pago con {method}, contáctanos directamente. Pulsa abajo:",
+        "deposit_msg": "Para pagar con {method}, contáctanos directamente. Pulsa abajo:",
         "contact_us": "📩 Contáctanos",
+        "website_msg": "🔥 Pulsa para visitar nuestro sitio:",
+        "website_not_set": "ℹ️ La URL del sitio aún no está configurada.",
+        "support_msg": "Pulsa abajo para contactar soporte:",
         "stats_title": "📊 Tus estadísticas",
         "stats_wins": "✅ Ganancias: {sum}$ (conteo: {count})",
         "stats_losses": "❌ Pérdidas: {sum}$ (conteo: {count})",
@@ -335,6 +362,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "userstats_header": "📊 Estadísticas de {uid}",
         "balance_linked_user": "✅ El bot está vinculado a tu cuenta de trading.\n💰 Tu saldo ahora es: {bal}$",
         "balance_updated_admin": "✅ Saldo actualizado para {uid}. Nuevo saldo: {bal}$",
+        "balance_deduct_user": "🔻 Se ha descontado {amount}$. \n💰 Tu nuevo saldo: {bal}$",
+        "balance_deduct_admin": "🔻 Descontado a {uid}. Nuevo saldo: {bal}$",
         "broadcast_need_text": "❌ Uso: /broadcast texto",
         "broadcast_done": "📢 Enviado: OK {ok} / Fallo {fail}",
         "relayed_to_admin": "📨 Tu mensaje fue enviado al administrador.",
@@ -347,6 +376,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_stats": "📊 Statistiques",
         "btn_lang": "🌐 Langue",
         "btn_deposit": "💳 Dépôt",
+        "btn_website": "🌍 Notre site",
+        "btn_support": "📞 Contacter le support",
         "help_title": "🛠 Commandes disponibles :",
         "help_public": [
             "/start - Menu principal",
@@ -375,6 +406,9 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_visa": "💳 Visa",
         "deposit_msg": "Pour payer via {method}, contactez-nous directement. Touchez ci-dessous :",
         "contact_us": "📩 Nous contacter",
+        "website_msg": "🔥 Touchez pour visiter notre site :",
+        "website_not_set": "ℹ️ L’URL du site n’est pas encore définie.",
+        "support_msg": "Touchez ci-dessous pour contacter le support :",
         "stats_title": "📊 Vos statistiques",
         "stats_wins": "✅ Gains : {sum}$ (nb : {count})",
         "stats_losses": "❌ Pertes : {sum}$ (nb : {count})",
@@ -392,6 +426,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "userstats_header": "📊 Statistiques de l’utilisateur {uid}",
         "balance_linked_user": "✅ Le bot est lié à votre compte de trading.\n💰 Votre solde est maintenant : {bal}$",
         "balance_updated_admin": "✅ Solde mis à jour pour {uid}. Nouveau solde : {bal}$",
+        "balance_deduct_user": "🔻 {amount}$ ont été déduits.\n💰 Nouveau solde : {bal}$",
+        "balance_deduct_admin": "🔻 Déduit pour {uid}. Nouveau solde : {bal}$",
         "broadcast_need_text": "❌ Usage : /broadcast texte",
         "broadcast_done": "📢 Envoyé : OK {ok} / Échec {fail}",
         "relayed_to_admin": "📨 Votre message a été envoyé à l’admin.",
@@ -490,8 +526,11 @@ def main_menu_markup(uid: str) -> telebot.types.InlineKeyboardMarkup:
           types.InlineKeyboardButton(tt["btn_withdraw"], callback_data="withdraw_menu"))
     m.add(types.InlineKeyboardButton(tt["btn_wstatus"], callback_data="withdraw_status"),
           types.InlineKeyboardButton(tt["btn_stats"], callback_data="stats"))
-    m.add(types.InlineKeyboardButton(tt["btn_deposit"], callback_data="deposit_menu"))
-    m.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
+    m.add(types.InlineKeyboardButton(tt["btn_deposit"], callback_data="deposit_menu"),
+          types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
+    # new row for website & support
+    m.add(types.InlineKeyboardButton(tt["btn_website"], callback_data="open_website"),
+          types.InlineKeyboardButton(tt["btn_support"], callback_data="open_support"))
     return m
 
 def show_main_menu(chat_id: int):
@@ -571,7 +610,7 @@ def cmd_record_set(message: types.Message):
     uid = ensure_user(message.chat.id)
     if not is_admin(uid):
         return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").split()
+    parts = (message.text or "").strip().split()
     if len(parts) < 2:
         return bot.reply_to(message, "Usage: /record_set <user_id>")
     target = parts[1]
@@ -613,7 +652,7 @@ def cmd_addbalance(message: types.Message):
     uid = ensure_user(message.chat.id)
     if not is_admin(uid):
         return
-    parts = (message.text or "").split()
+    parts = (message.text or "").strip().split()
     if len(parts) < 3:
         return bot.reply_to(message, "Usage: /addbalance &lt;user_id&gt; &lt;amount&gt;")
     target, amount = parts[1], int(parts[2])
@@ -622,7 +661,7 @@ def cmd_addbalance(message: types.Message):
     users[target]["balance"] = users[target].get("balance", 0) + amount
     save_json("users.json", users)
 
-    # Notify target with the new phrasing
+    # Notify target
     try:
         bot.send_message(int(target), T(target, "balance_linked_user", bal=users[target]["balance"]))
     except Exception as e:
@@ -630,6 +669,32 @@ def cmd_addbalance(message: types.Message):
 
     # Confirm to admin
     bot.reply_to(message, T(uid, "balance_updated_admin", uid=target, bal=users[target]["balance"]))
+
+@bot.message_handler(commands=["removebalance"])
+def cmd_removebalance(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) < 3:
+        return bot.reply_to(message, "Usage: /removebalance &lt;user_id&gt; &lt;amount&gt;")
+    target, amount = parts[1], int(parts[2])
+    users = load_json("users.json") or {}
+    users.setdefault(target, {"balance": 0})
+    new_bal = users[target].get("balance", 0) - amount
+    if new_bal < 0:
+        new_bal = 0
+    users[target]["balance"] = new_bal
+    save_json("users.json", users)
+
+    # Notify target about deduction
+    try:
+        bot.send_message(int(target), T(target, "balance_deduct_user", amount=amount, bal=new_bal))
+    except Exception as e:
+        log.warning("Cannot message target %s: %s", target, e)
+
+    # Confirm to admin
+    bot.reply_to(message, T(uid, "balance_deduct_admin", uid=target, bal=new_bal))
 
 @bot.message_handler(commands=["broadcast"])
 def cmd_broadcast(message: types.Message):
@@ -707,7 +772,7 @@ def dispatch_command(message: types.Message):
         return cmd_mystats(message)
     return
 
-@bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
+@bot.message_handler(func=lambda m: bool(m.text) and m.text.strip().startswith(("/", "／", "⁄")))
 def any_command_like(message: types.Message):
     try:
         return dispatch_command(message)
@@ -786,7 +851,6 @@ def callbacks(call: types.CallbackQuery):
         return bot.send_message(call.message.chat.id, "Nothing to cancel.")
 
     if data == "stats":
-        # show per-user stats (not bot totals)
         return bot.send_message(call.message.chat.id, format_user_stats(uid, uid))
 
     if data == "deposit_menu":
@@ -815,11 +879,26 @@ def callbacks(call: types.CallbackQuery):
         mm.add(types.InlineKeyboardButton(tt["contact_us"], url=chat_link))
         return bot.send_message(call.message.chat.id, T(uid, "deposit_msg", method=method), reply_markup=mm)
 
+    if data == "open_website":
+        tt = TEXT[get_lang(uid)]
+        if WEBSITE_URL:
+            mm = types.InlineKeyboardMarkup()
+            mm.add(types.InlineKeyboardButton(tt["btn_website"], url=WEBSITE_URL))
+            return bot.send_message(call.message.chat.id, tt["website_msg"], reply_markup=mm)
+        else:
+            return bot.send_message(call.message.chat.id, tt["website_not_set"])
+
+    if data == "open_support":
+        tt = TEXT[get_lang(uid)]
+        chat_link = f"https://t.me/{SUPPORT_USER}"
+        mm = types.InlineKeyboardMarkup()
+        mm.add(types.InlineKeyboardButton(tt["contact_us"], url=chat_link))
+        return bot.send_message(call.message.chat.id, tt["support_msg"], reply_markup=mm)
+
 # ---------- Non-command messages: relay to admin ----------
 @bot.message_handler(func=lambda m: bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
 def relay_to_admin(message: types.Message):
     uid = ensure_user(message.chat.id)
-    # forward a clean relay to admin
     try:
         uname = f"@{message.from_user.username}" if message.from_user.username else ""
     except Exception:
@@ -831,7 +910,6 @@ def relay_to_admin(message: types.Message):
         bot.send_message(ADMIN_ID, info)
     except Exception as e:
         log.error("Failed relaying to admin: %s", e)
-    # Optional: acknowledge user
     try:
         bot.reply_to(message, T(uid, "relayed_to_admin"))
     except Exception:
@@ -845,18 +923,14 @@ def record_mode_numbers(message: types.Message):
     if not target:
         return
     txt = (message.text or "").strip()
-    # Interpret: "10-" or "-10" -> loss ; "10" -> win
     typ: Optional[str] = None
     amt_str = None
     if txt.endswith("-") and txt[:-1].isdigit():
-        typ = "loss"
-        amt_str = txt[:-1]
+        typ = "loss"; amt_str = txt[:-1]
     elif txt.startswith("-") and txt[1:].isdigit():
-        typ = "loss"
-        amt_str = txt[1:]
+        typ = "loss"; amt_str = txt[1:]
     elif txt.isdigit():
-        typ = "win"
-        amt_str = txt
+        typ = "win"; amt_str = txt
     if typ is None or not amt_str:
         return bot.reply_to(message, T(admin_uid, "record_invalid_amount"))
     amount = int(amt_str)
@@ -902,7 +976,6 @@ if WEBHOOK_URL:
 
 if __name__ == "__main__":
     if WEBHOOK_URL:
-        # Run Flask on Render (bind to PORT) — avoids polling conflict
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
     else:
         try:
