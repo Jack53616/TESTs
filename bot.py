@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Telegram bot (Render-ready) — fixed:
+Telegram bot (Render-ready) — features:
 - i18n (ar/en/tr/es/fr)
-- Main menu: Daily / Withdraw / Withdrawal requests / Stats / Language
+- Main menu: Daily / Withdraw / Withdrawal requests / Stats / Language / Deposit
 - Withdraw via buttons or /withdraw <amount>
+- Per-user stats (win/loss) with admin record mode and commands
+- Broadcast for admin
+- Non-command messages are relayed to admin
 - Storage: DB (db_kv.py) if DATABASE_URL, else JSON files
 - Fixes:
-  * T() param renamed to avoid conflict
+  * T() param renamed
   * Escaped <amount>, <text>, etc. for HTML parse mode
   * __main__ runs Flask when WEBHOOK_URL is set (Render) to avoid polling conflict
 """
-import os, json, logging
+import os, json, logging, html
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Optional
 from flask import Flask, request
 
 import telebot
@@ -23,10 +26,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("bot")
 
 # ---------- ENV ----------
-API_TOKEN   = os.getenv("BOT_TOKEN", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
-ADMIN_ID    = int(os.getenv("ADMIN_ID", "1262317603"))
+API_TOKEN    = os.getenv("BOT_TOKEN", "").strip()
+WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "").rstrip("/")
+ADMIN_ID     = int(os.getenv("ADMIN_ID", "1262317603"))
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SUPPORT_USER = os.getenv("SUPPORT_USERNAME", "qlsupport").lstrip("@") or "qlsupport"
 
 if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -50,6 +54,7 @@ DATA_FILES = {
     "withdraw_requests": "withdraw_requests.json",
     "withdraw_log": "withdraw_log.json",
     "trades": "trades.json",
+    "stats": "stats.json",
 }
 
 def load_json(name: str) -> Any:
@@ -95,7 +100,7 @@ def load_daily_text() -> str:
 
 def save_daily_text(text: str) -> None:
     with open("daily_trade.txt", "w", encoding="utf-8") as f:
-        f.write(text.strip())
+        f.write((text or "").strip())
 
 # ---------- i18n ----------
 LANGS = ["ar", "en", "tr", "es", "fr"]
@@ -107,15 +112,18 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_wstatus": "💼 معاملات السحب",
         "btn_stats": "📊 الإحصائيات",
         "btn_lang": "🌐 اللغة",
+        "btn_deposit": "💳 الإيداع",
         "help_title": "🛠 الأوامر المتاحة:",
         "help_public": [
             "/start - القائمة الرئيسية",
             "/id - عرض آيديك",
             "/balance - رصيدك",
             "/daily - صفقة اليوم",
-            "/withdraw &lt;amount&gt; - طلب سحب (مثال: /withdraw 50)"
+            "/withdraw &lt;amount&gt; - طلب سحب (مثال: /withdraw 50)",
+            "/mystats - إحصائياتي"
         ],
         "daily_none": "لا يوجد صفقة اليوم حالياً.",
+        "cleardaily_ok": "🧹 تم مسح صفقة اليوم.",
         "withdraw_enter": "❌ الصيغة: /withdraw 50",
         "withdraw_invalid": "❌ مبلغ غير صالح.",
         "withdraw_insufficient": "الرصيد غير كافٍ. رصيدك: {bal}$",
@@ -124,7 +132,41 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "lang_saved": "✅ تم ضبط اللغة العربية.",
         "choose_withdraw_amount": "اختر مبلغ السحب:",
         "requests_waiting": "طلباتك قيد الانتظار:",
-        "no_requests": "لا توجد طلبات قيد الانتظار."
+        "no_requests": "لا توجد طلبات قيد الانتظار.",
+        # deposit
+        "deposit_choose": "اختر طريقة الإيداع:",
+        "deposit_cash": "💵 كاش",
+        "deposit_paypal": "🅿️ باي بال",
+        "deposit_bank": "🏦 تحويل بنكي",
+        "deposit_mc": "💳 ماستركارد",
+        "deposit_visa": "💳 فيزا",
+        "deposit_msg": "لإتمام الدفع عبر {method}، يرجى التواصل مباشرة معنا. اضغط الزر أدناه:",
+        "contact_us": "📩 تواصل معنا",
+        # stats i18n
+        "stats_title": "📊 إحصائياتك",
+        "stats_wins": "✅ الأرباح: {sum}$ (عدد: {count})",
+        "stats_losses": "❌ الخسائر: {sum}$ (عدد: {count})",
+        "stats_net": "⚖️ الصافي: {net}$",
+        "stats_no_data": "لا توجد عمليات حتى الآن.",
+        "stats_line_win": "{at} — ربح +{amount}$",
+        "stats_line_loss": "{at} — خسارة -{amount}$",
+        # admin / record
+        "admin_only": "🚫 هذا الأمر للأدمن فقط.",
+        "record_target_is": "🎯 تم اختيار المستخدم: {uid}. أرسل أرقام مثل 10 (ربح) أو 10- (خسارة).",
+        "record_mode_on": "🟢 تم تفعيل وضع التسجيل للمستخدم {uid}.",
+        "record_mode_off": "🛑 تم إنهاء وضع التسجيل.",
+        "record_saved_win": "✅ تم تسجيل ربح +{amount}$ للمستخدم {uid} — {at}",
+        "record_saved_loss": "✅ تم تسجيل خسارة -{amount}$ للمستخدم {uid} — {at}",
+        "record_invalid_amount": "❌ الرجاء إرسال رقم صحيح (مثال: 10 أو 10-).",
+        "userstats_header": "📊 إحصائيات المستخدم {uid}",
+        # balance link
+        "balance_linked_user": "✅ تم ربط البوت بحسابك التداول.\n💰 رصيدك الآن: {bal}$",
+        "balance_updated_admin": "✅ تم تحديث رصيد {uid}. الرصيد الآن: {bal}$",
+        # broadcast
+        "broadcast_need_text": "❌ الصيغة: /broadcast النص",
+        "broadcast_done": "📢 تم الإرسال: نجاح {ok} / فشل {fail}",
+        # relay
+        "relayed_to_admin": "📨 تم إرسال رسالتك للإدارة.",
     },
     "en": {
         "welcome": "👋 Welcome to the trading bot\n\n💰 Your balance: {balance}$\n🆔 Your ID: {uid}",
@@ -133,15 +175,18 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_wstatus": "💼 Withdrawal requests",
         "btn_stats": "📊 Stats",
         "btn_lang": "🌐 Language",
+        "btn_deposit": "💳 Deposit",
         "help_title": "🛠 Available commands:",
         "help_public": [
             "/start - Main menu",
             "/id - Show your ID",
             "/balance - Your balance",
             "/daily - Daily trade",
-            "/withdraw &lt;amount&gt; - Request withdrawal"
+            "/withdraw &lt;amount&gt; - Request withdrawal",
+            "/mystats - My stats"
         ],
         "daily_none": "No daily trade yet.",
+        "cleardaily_ok": "🧹 Daily trade cleared.",
         "withdraw_enter": "❌ Format: /withdraw 50",
         "withdraw_invalid": "❌ Invalid amount.",
         "withdraw_insufficient": "Insufficient balance. Your balance: {bal}$",
@@ -150,7 +195,35 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "lang_saved": "✅ Language set to English.",
         "choose_withdraw_amount": "Choose withdraw amount:",
         "requests_waiting": "Your pending requests:",
-        "no_requests": "No pending requests."
+        "no_requests": "No pending requests.",
+        "deposit_choose": "Choose a deposit method:",
+        "deposit_cash": "💵 Cash",
+        "deposit_paypal": "🅿️ PayPal",
+        "deposit_bank": "🏦 Bank Transfer",
+        "deposit_mc": "💳 Mastercard",
+        "deposit_visa": "💳 Visa",
+        "deposit_msg": "To complete payment via {method}, please contact us directly. Tap below:",
+        "contact_us": "📩 Contact us",
+        "stats_title": "📊 Your statistics",
+        "stats_wins": "✅ Wins: {sum}$ (count: {count})",
+        "stats_losses": "❌ Losses: {sum}$ (count: {count})",
+        "stats_net": "⚖️ Net: {net}$",
+        "stats_no_data": "No operations yet.",
+        "stats_line_win": "{at} — Win +{amount}$",
+        "stats_line_loss": "{at} — Loss -{amount}$",
+        "admin_only": "🚫 Admin only.",
+        "record_target_is": "🎯 Target user: {uid}. Send numbers like 10 (win) or 10- (loss).",
+        "record_mode_on": "🟢 Record mode ON for user {uid}.",
+        "record_mode_off": "🛑 Record mode OFF.",
+        "record_saved_win": "✅ Recorded WIN +{amount}$ for {uid} — {at}",
+        "record_saved_loss": "✅ Recorded LOSS -{amount}$ for {uid} — {at}",
+        "record_invalid_amount": "❌ Send a valid number (e.g., 10 or 10-).",
+        "userstats_header": "📊 Stats for user {uid}",
+        "balance_linked_user": "✅ The bot is linked to your trading account.\n💰 Your balance is now: {bal}$",
+        "balance_updated_admin": "✅ Balance updated for {uid}. New balance: {bal}$",
+        "broadcast_need_text": "❌ Usage: /broadcast text",
+        "broadcast_done": "📢 Sent: OK {ok} / Fail {fail}",
+        "relayed_to_admin": "📨 Your message was sent to the admin.",
     },
     "tr": {
         "welcome": "👋 Trading botuna hoş geldin\n\n💰 Bakiyen: {balance}$\n🆔 ID: {uid}",
@@ -159,15 +232,18 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_wstatus": "💼 Çekim talepleri",
         "btn_stats": "📊 İstatistikler",
         "btn_lang": "🌐 Dil",
+        "btn_deposit": "💳 Yatırma",
         "help_title": "🛠 Kullanılabilir komutlar:",
         "help_public": [
             "/start - Ana menü",
             "/id - ID'ni göster",
             "/balance - Bakiyen",
             "/daily - Günün işlemi",
-            "/withdraw &lt;tutar&gt; - Çekim isteği"
+            "/withdraw &lt;tutar&gt; - Çekim isteği",
+            "/mystats - İstatistiklerim"
         ],
         "daily_none": "Henüz günlük işlem yok.",
+        "cleardaily_ok": "🧹 Günlük işlem temizlendi.",
         "withdraw_enter": "❌ Format: /withdraw 50",
         "withdraw_invalid": "❌ Geçersiz tutar.",
         "withdraw_insufficient": "Yetersiz bakiye. Bakiyen: {bal}$",
@@ -176,7 +252,35 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "lang_saved": "✅ Dil Türkçe olarak ayarlandı.",
         "choose_withdraw_amount": "Çekim tutarını seç:",
         "requests_waiting": "Bekleyen taleplerin:",
-        "no_requests": "Bekleyen talep yok."
+        "no_requests": "Bekleyen talep yok.",
+        "deposit_choose": "Bir yatırma yöntemi seç:",
+        "deposit_cash": "💵 Nakit",
+        "deposit_paypal": "🅿️ PayPal",
+        "deposit_bank": "🏦 Banka Havalesi",
+        "deposit_mc": "💳 Mastercard",
+        "deposit_visa": "💳 Visa",
+        "deposit_msg": "{method} ile ödeme için lütfen doğrudan bizimle iletişime geçin. Aşağıya dokunun:",
+        "contact_us": "📩 Bizimle iletişim",
+        "stats_title": "📊 İstatistiklerin",
+        "stats_wins": "✅ Kazançlar: {sum}$ (adet: {count})",
+        "stats_losses": "❌ Kayıplar: {sum}$ (adet: {count})",
+        "stats_net": "⚖️ Net: {net}$",
+        "stats_no_data": "Henüz işlem yok.",
+        "stats_line_win": "{at} — Kazanç +{amount}$",
+        "stats_line_loss": "{at} — Kayıp -{amount}$",
+        "admin_only": "🚫 Sadece yönetici.",
+        "record_target_is": "🎯 Hedef kullanıcı: {uid}. 10 (kazanç) veya 10- (kayıp) gibi sayılar gönderin.",
+        "record_mode_on": "🟢 {uid} için kayıt modu AÇIK.",
+        "record_mode_off": "🛑 Kayıt modu KAPALI.",
+        "record_saved_win": "✅ {uid} için KAZANÇ +{amount}$ — {at}",
+        "record_saved_loss": "✅ {uid} için KAYIP -{amount}$ — {at}",
+        "record_invalid_amount": "❌ Geçerli sayı gönderin (örn. 10 veya 10-).",
+        "userstats_header": "📊 {uid} kullanıcısının istatistikleri",
+        "balance_linked_user": "✅ Bot, işlem hesabınıza bağlandı.\n💰 Güncel bakiyeniz: {bal}$",
+        "balance_updated_admin": "✅ {uid} için bakiye güncellendi. Yeni bakiye: {bal}$",
+        "broadcast_need_text": "❌ Kullanım: /broadcast metin",
+        "broadcast_done": "📢 Gönderildi: Başarılı {ok} / Başarısız {fail}",
+        "relayed_to_admin": "📨 Mesajınız yöneticiye gönderildi.",
     },
     "es": {
         "welcome": "👋 Bienvenido al bot de trading\n\n💰 Tu saldo: {balance}$\n🆔 Tu ID: {uid}",
@@ -185,15 +289,18 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_wstatus": "💼 Solicitudes de retiro",
         "btn_stats": "📊 Estadísticas",
         "btn_lang": "🌐 Idioma",
+        "btn_deposit": "💳 Depósito",
         "help_title": "🛠 Comandos disponibles:",
         "help_public": [
             "/start - Menú principal",
             "/id - Mostrar tu ID",
             "/balance - Tu saldo",
             "/daily - Operación del día",
-            "/withdraw &lt;monto&gt; - Solicitar retiro"
+            "/withdraw &lt;monto&gt; - Solicitar retiro",
+            "/mystats - Mis estadísticas"
         ],
         "daily_none": "Aún no hay operación del día.",
+        "cleardaily_ok": "🧹 Operación del día eliminada.",
         "withdraw_enter": "❌ Formato: /withdraw 50",
         "withdraw_invalid": "❌ Monto inválido.",
         "withdraw_insufficient": "Saldo insuficiente. Tu saldo: {bal}$",
@@ -202,7 +309,35 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "lang_saved": "✅ Idioma configurado a español.",
         "choose_withdraw_amount": "Elige el monto a retirar:",
         "requests_waiting": "Tus solicitudes pendientes:",
-        "no_requests": "No hay solicitudes pendientes."
+        "no_requests": "No hay solicitudes pendientes.",
+        "deposit_choose": "Elige un método de depósito:",
+        "deposit_cash": "💵 Efectivo",
+        "deposit_paypal": "🅿️ PayPal",
+        "deposit_bank": "🏦 Transferencia bancaria",
+        "deposit_mc": "💳 Mastercard",
+        "deposit_visa": "💳 Visa",
+        "deposit_msg": "Para completar el pago con {method}, contáctanos directamente. Pulsa abajo:",
+        "contact_us": "📩 Contáctanos",
+        "stats_title": "📊 Tus estadísticas",
+        "stats_wins": "✅ Ganancias: {sum}$ (conteo: {count})",
+        "stats_losses": "❌ Pérdidas: {sum}$ (conteo: {count})",
+        "stats_net": "⚖️ Neto: {net}$",
+        "stats_no_data": "Aún no hay operaciones.",
+        "stats_line_win": "{at} — Ganancia +{amount}$",
+        "stats_line_loss": "{at} — Pérdida -{amount}$",
+        "admin_only": "🚫 Solo admin.",
+        "record_target_is": "🎯 Usuario objetivo: {uid}. Envía números como 10 (ganancia) o 10- (pérdida).",
+        "record_mode_on": "🟢 Modo de registro ACTIVADO para {uid}.",
+        "record_mode_off": "🛑 Modo de registro DESACTIVADO.",
+        "record_saved_win": "✅ Registrada GANANCIA +{amount}$ para {uid} — {at}",
+        "record_saved_loss": "✅ Registrada PÉRDIDA -{amount}$ para {uid} — {at}",
+        "record_invalid_amount": "❌ Envía un número válido (ej. 10 o 10-).",
+        "userstats_header": "📊 Estadísticas de {uid}",
+        "balance_linked_user": "✅ El bot está vinculado a tu cuenta de trading.\n💰 Tu saldo ahora es: {bal}$",
+        "balance_updated_admin": "✅ Saldo actualizado para {uid}. Nuevo saldo: {bal}$",
+        "broadcast_need_text": "❌ Uso: /broadcast texto",
+        "broadcast_done": "📢 Enviado: OK {ok} / Fallo {fail}",
+        "relayed_to_admin": "📨 Tu mensaje fue enviado al administrador.",
     },
     "fr": {
         "welcome": "👋 Bienvenue dans le bot de trading\n\n💰 Votre solde : {balance}$\n🆔 Votre ID : {uid}",
@@ -211,15 +346,18 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_wstatus": "💼 Demandes de retrait",
         "btn_stats": "📊 Statistiques",
         "btn_lang": "🌐 Langue",
+        "btn_deposit": "💳 Dépôt",
         "help_title": "🛠 Commandes disponibles :",
         "help_public": [
             "/start - Menu principal",
             "/id - Afficher votre ID",
             "/balance - Votre solde",
             "/daily - Trade du jour",
-            "/withdraw &lt;montant&gt; - Demande de retrait"
+            "/withdraw &lt;montant&gt; - Demande de retrait",
+            "/mystats - Mes statistiques"
         ],
         "daily_none": "Aucun trade du jour pour le moment.",
+        "cleardaily_ok": "🧹 Trade du jour supprimé.",
         "withdraw_enter": "❌ Format : /withdraw 50",
         "withdraw_invalid": "❌ Montant invalide.",
         "withdraw_insufficient": "Solde insuffisant. Votre solde : {bal}$",
@@ -228,7 +366,35 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "lang_saved": "✅ Langue définie sur le français.",
         "choose_withdraw_amount": "Choisissez le montant du retrait :",
         "requests_waiting": "Vos demandes en attente :",
-        "no_requests": "Aucune demande en attente."
+        "no_requests": "Aucune demande en attente.",
+        "deposit_choose": "Choisissez une méthode de dépôt :",
+        "deposit_cash": "💵 Espèces",
+        "deposit_paypal": "🅿️ PayPal",
+        "deposit_bank": "🏦 Virement bancaire",
+        "deposit_mc": "💳 Mastercard",
+        "deposit_visa": "💳 Visa",
+        "deposit_msg": "Pour payer via {method}, contactez-nous directement. Touchez ci-dessous :",
+        "contact_us": "📩 Nous contacter",
+        "stats_title": "📊 Vos statistiques",
+        "stats_wins": "✅ Gains : {sum}$ (nb : {count})",
+        "stats_losses": "❌ Pertes : {sum}$ (nb : {count})",
+        "stats_net": "⚖️ Net : {net}$",
+        "stats_no_data": "Aucune opération pour l’instant.",
+        "stats_line_win": "{at} — Gain +{amount}$",
+        "stats_line_loss": "{at} — Perte -{amount}$",
+        "admin_only": "🚫 Réservé à l’admin.",
+        "record_target_is": "🎯 Utilisateur ciblé : {uid}. Envoyez des nombres comme 10 (gain) ou 10- (perte).",
+        "record_mode_on": "🟢 Mode enregistrement ACTIVÉ pour {uid}.",
+        "record_mode_off": "🛑 Mode enregistrement DÉSACTIVÉ.",
+        "record_saved_win": "✅ GAIN +{amount}$ enregistré pour {uid} — {at}",
+        "record_saved_loss": "✅ PERTE -{amount}$ enregistrée pour {uid} — {at}",
+        "record_invalid_amount": "❌ Envoyez un nombre valide (ex : 10 ou 10-).",
+        "userstats_header": "📊 Statistiques de l’utilisateur {uid}",
+        "balance_linked_user": "✅ Le bot est lié à votre compte de trading.\n💰 Votre solde est maintenant : {bal}$",
+        "balance_updated_admin": "✅ Solde mis à jour pour {uid}. Nouveau solde : {bal}$",
+        "broadcast_need_text": "❌ Usage : /broadcast texte",
+        "broadcast_done": "📢 Envoyé : OK {ok} / Échec {fail}",
+        "relayed_to_admin": "📨 Votre message a été envoyé à l’admin.",
     }
 }
 
@@ -266,6 +432,57 @@ def is_admin(uid: str) -> bool:
     users = load_json("users.json") or {}
     return (users.get(uid, {}) or {}).get("role") == "admin"
 
+# ---------- Stats helpers ----------
+def _now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def stats_get(uid: str) -> Dict[str, Any]:
+    stats = load_json("stats.json") or {}
+    return stats.get(uid, {
+        "events": [],  # [{"type":"win"|"loss","amount":int,"at":str}]
+        "totals": {"win": {"count": 0, "sum": 0}, "loss": {"count": 0, "sum": 0}}
+    })
+
+def stats_save(uid: str, data: Dict[str, Any]) -> None:
+    stats = load_json("stats.json") or {}
+    stats[uid] = data
+    save_json("stats.json", stats)
+
+def stats_add(uid: str, typ: str, amount: int) -> None:
+    data = stats_get(uid)
+    data["events"].insert(0, {"type": typ, "amount": int(amount), "at": _now_str()})
+    t = data["totals"].setdefault(typ, {"count": 0, "sum": 0})
+    t["count"] += 1
+    t["sum"] += int(amount)
+    stats_save(uid, data)
+
+def format_user_stats(viewer_uid: str, target_uid: str, limit: int = 10) -> str:
+    d = stats_get(target_uid)
+    wins = d["totals"]["win"]
+    losses = d["totals"]["loss"]
+    net = int(wins["sum"]) - int(losses["sum"])
+    header = f"<b>{T(viewer_uid, 'stats_title' if viewer_uid==target_uid else 'userstats_header', uid=target_uid)}</b>"
+    lines = [
+        header,
+        T(viewer_uid, "stats_wins", sum=wins["sum"], count=wins["count"]),
+        T(viewer_uid, "stats_losses", sum=losses["sum"], count=losses["count"]),
+        T(viewer_uid, "stats_net", net=net)
+    ]
+    events = d["events"][:limit]
+    if not events:
+        lines.append(T(viewer_uid, "stats_no_data"))
+    else:
+        for e in events:
+            if e["type"] == "win":
+                lines.append(T(viewer_uid, "stats_line_win", at=e["at"], amount=e["amount"]))
+            else:
+                lines.append(T(viewer_uid, "stats_line_loss", at=e["at"], amount=e["amount"]))
+    return "\n".join(lines)
+
+# in-memory admin record modes {admin_uid: target_uid}
+RECORD_MODE: Dict[str, str] = {}
+
+# ---------- UI ----------
 def main_menu_markup(uid: str) -> telebot.types.InlineKeyboardMarkup:
     tt = TEXT[get_lang(uid)]
     m = types.InlineKeyboardMarkup(row_width=2)
@@ -273,6 +490,7 @@ def main_menu_markup(uid: str) -> telebot.types.InlineKeyboardMarkup:
           types.InlineKeyboardButton(tt["btn_withdraw"], callback_data="withdraw_menu"))
     m.add(types.InlineKeyboardButton(tt["btn_wstatus"], callback_data="withdraw_status"),
           types.InlineKeyboardButton(tt["btn_stats"], callback_data="stats"))
+    m.add(types.InlineKeyboardButton(tt["btn_deposit"], callback_data="deposit_menu"))
     m.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
     return m
 
@@ -287,7 +505,6 @@ def show_main_menu(chat_id: int):
 def cmd_start(message: types.Message):
     ensure_user(message.chat.id)
     show_main_menu(message.chat.id)
-    log.info("START for %s", message.from_user.id)
 
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
@@ -313,6 +530,14 @@ def cmd_daily(message: types.Message):
     daily = load_daily_text() or TEXT[get_lang(uid)]["daily_none"]
     bot.reply_to(message, daily if isinstance(daily, str) else str(daily))
 
+@bot.message_handler(commands=["cleardaily"])
+def cmd_cleardaily(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    save_daily_text("")
+    bot.reply_to(message, T(uid, "cleardaily_ok"))
+
 @bot.message_handler(commands=["withdraw"])
 def cmd_withdraw(message: types.Message):
     uid = ensure_user(message.chat.id)
@@ -324,6 +549,106 @@ def cmd_withdraw(message: types.Message):
     except Exception:
         return bot.reply_to(message, TEXT[get_lang(uid)]["withdraw_invalid"])
     return create_withdraw_request(message.chat.id, uid, amount)
+
+@bot.message_handler(commands=["mystats"])
+def cmd_mystats(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    bot.reply_to(message, format_user_stats(uid, uid))
+
+@bot.message_handler(commands=["userstats"])
+def cmd_userstats(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        return bot.reply_to(message, "Usage: /userstats <user_id>")
+    target = parts[1]
+    bot.reply_to(message, format_user_stats(uid, target))
+
+@bot.message_handler(commands=["record_set"])
+def cmd_record_set(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        return bot.reply_to(message, "Usage: /record_set <user_id>")
+    target = parts[1]
+    RECORD_MODE[uid] = target
+    bot.reply_to(message, T(uid, "record_mode_on", uid=target) + "\n" + T(uid, "record_target_is", uid=target))
+
+@bot.message_handler(commands=["record_done"])
+def cmd_record_done(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    if uid in RECORD_MODE:
+        del RECORD_MODE[uid]
+    bot.reply_to(message, T(uid, "record_mode_off"))
+
+@bot.message_handler(commands=["win", "loss"])
+def cmd_win_loss(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    parts = (message.text or "").strip().split()
+    if len(parts) < 3:
+        return bot.reply_to(message, f"Usage: /{message.text.split()[0][1:]} <user_id> <amount>")
+    target, amount_str = parts[1], parts[2]
+    try:
+        amount = int(amount_str)
+    except Exception:
+        return bot.reply_to(message, T(uid, "record_invalid_amount"))
+    typ = "win" if message.text.startswith("/win") else "loss"
+    stats_add(target, typ, amount)
+    at = _now_str()
+    if typ == "win":
+        bot.reply_to(message, T(uid, "record_saved_win", amount=amount, uid=target, at=at))
+    else:
+        bot.reply_to(message, T(uid, "record_saved_loss", amount=amount, uid=target, at=at))
+
+@bot.message_handler(commands=["addbalance"])
+def cmd_addbalance(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return bot.reply_to(message, "Usage: /addbalance &lt;user_id&gt; &lt;amount&gt;")
+    target, amount = parts[1], int(parts[2])
+    users = load_json("users.json") or {}
+    users.setdefault(target, {"balance": 0})
+    users[target]["balance"] = users[target].get("balance", 0) + amount
+    save_json("users.json", users)
+
+    # Notify target with the new phrasing
+    try:
+        bot.send_message(int(target), T(target, "balance_linked_user", bal=users[target]["balance"]))
+    except Exception as e:
+        log.warning("Cannot message target %s: %s", target, e)
+
+    # Confirm to admin
+    bot.reply_to(message, T(uid, "balance_updated_admin", uid=target, bal=users[target]["balance"]))
+
+@bot.message_handler(commands=["broadcast"])
+def cmd_broadcast(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    raw = (message.text or "")
+    if " " not in raw.strip():
+        return bot.reply_to(message, T(uid, "broadcast_need_text"))
+    text = raw.split(" ", 1)[1].strip()
+    users = load_json("users.json") or {}
+    ok = fail = 0
+    for tuid in list(users.keys()):
+        try:
+            bot.send_message(int(tuid), text)
+            ok += 1
+        except Exception:
+            fail += 1
+    bot.reply_to(message, T(uid, "broadcast_done", ok=ok, fail=fail))
 
 # ---------- Withdraw Helpers ----------
 def open_withdraw_menu(chat_id: int, uid: str):
@@ -349,7 +674,7 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     req_id = str(len(withdraw_requests) + 1)
     withdraw_requests[req_id] = {
         "user_id": uid, "amount": amount, "status": "بانتظار الموافقة",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "created_at": _now_str()
     }
     save_json("withdraw_requests.json", withdraw_requests)
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
@@ -366,7 +691,6 @@ def norm_text(txt: str) -> str:
 def dispatch_command(message: types.Message):
     raw = norm_text(message.text or "")
     cmd = raw.split()[0].lower()
-    log.info("DISPATCH raw=%r parsed_cmd=%s", raw, cmd)
     if cmd in ("/start", "start"):
         return cmd_start(message)
     if cmd in ("/help", "help"):
@@ -379,6 +703,8 @@ def dispatch_command(message: types.Message):
         return cmd_daily(message)
     if cmd.startswith("/withdraw") or cmd=="withdraw":
         return cmd_withdraw(message)
+    if cmd == "/mystats":
+        return cmd_mystats(message)
     return
 
 @bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
@@ -460,12 +786,86 @@ def callbacks(call: types.CallbackQuery):
         return bot.send_message(call.message.chat.id, "Nothing to cancel.")
 
     if data == "stats":
-        users = load_json("users.json") or {}
-        wreq = load_json("withdraw_requests.json") or {}
-        msg = f"👥 Users: {len(users)}\n💼 Withdraw requests: {len(wreq)}"
-        mm = types.InlineKeyboardMarkup()
+        # show per-user stats (not bot totals)
+        return bot.send_message(call.message.chat.id, format_user_stats(uid, uid))
+
+    if data == "deposit_menu":
+        tt = TEXT[get_lang(uid)]
+        mm = types.InlineKeyboardMarkup(row_width=2)
+        mm.add(types.InlineKeyboardButton(tt["deposit_cash"], callback_data="dep_cash"),
+               types.InlineKeyboardButton(tt["deposit_paypal"], callback_data="dep_paypal"))
+        mm.add(types.InlineKeyboardButton(tt["deposit_bank"], callback_data="dep_bank"))
+        mm.add(types.InlineKeyboardButton(tt["deposit_mc"], callback_data="dep_mc"),
+               types.InlineKeyboardButton(tt["deposit_visa"], callback_data="dep_visa"))
         mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, msg, reply_markup=mm)
+        return bot.send_message(call.message.chat.id, tt["deposit_choose"], reply_markup=mm)
+
+    if data.startswith("dep_"):
+        tt = TEXT[get_lang(uid)]
+        methods = {
+            "dep_cash": tt["deposit_cash"],
+            "dep_paypal": tt["deposit_paypal"],
+            "dep_bank": tt["deposit_bank"],
+            "dep_mc": tt["deposit_mc"],
+            "dep_visa": tt["deposit_visa"],
+        }
+        method = methods.get(data, "Payment")
+        chat_link = f"https://t.me/{SUPPORT_USER}"
+        mm = types.InlineKeyboardMarkup()
+        mm.add(types.InlineKeyboardButton(tt["contact_us"], url=chat_link))
+        return bot.send_message(call.message.chat.id, T(uid, "deposit_msg", method=method), reply_markup=mm)
+
+# ---------- Non-command messages: relay to admin ----------
+@bot.message_handler(func=lambda m: bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
+def relay_to_admin(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    # forward a clean relay to admin
+    try:
+        uname = f"@{message.from_user.username}" if message.from_user.username else ""
+    except Exception:
+        uname = ""
+    info = f"📨 MSG from {message.from_user.id} {html.escape(uname)}\n" \
+           f"Name: {html.escape((message.from_user.first_name or '') + ' ' + (message.from_user.last_name or ''))}\n" \
+           f"Text:\n{html.escape(message.text or '')}"
+    try:
+        bot.send_message(ADMIN_ID, info)
+    except Exception as e:
+        log.error("Failed relaying to admin: %s", e)
+    # Optional: acknowledge user
+    try:
+        bot.reply_to(message, T(uid, "relayed_to_admin"))
+    except Exception:
+        pass
+
+# ---------- Record mode numeric handler (admin only, numbers) ----------
+@bot.message_handler(func=lambda m: (str(m.from_user.id) in RECORD_MODE) and bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
+def record_mode_numbers(message: types.Message):
+    admin_uid = ensure_user(message.from_user.id)
+    target = RECORD_MODE.get(admin_uid)
+    if not target:
+        return
+    txt = (message.text or "").strip()
+    # Interpret: "10-" or "-10" -> loss ; "10" -> win
+    typ: Optional[str] = None
+    amt_str = None
+    if txt.endswith("-") and txt[:-1].isdigit():
+        typ = "loss"
+        amt_str = txt[:-1]
+    elif txt.startswith("-") and txt[1:].isdigit():
+        typ = "loss"
+        amt_str = txt[1:]
+    elif txt.isdigit():
+        typ = "win"
+        amt_str = txt
+    if typ is None or not amt_str:
+        return bot.reply_to(message, T(admin_uid, "record_invalid_amount"))
+    amount = int(amt_str)
+    stats_add(target, typ, amount)
+    at = _now_str()
+    if typ == "win":
+        bot.reply_to(message, T(admin_uid, "record_saved_win", amount=amount, uid=target, at=at))
+    else:
+        bot.reply_to(message, T(admin_uid, "record_saved_loss", amount=amount, uid=target, at=at))
 
 # ---------- Webhook & Server ----------
 @app.get("/")
@@ -505,7 +905,6 @@ if __name__ == "__main__":
         # Run Flask on Render (bind to PORT) — avoids polling conflict
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
     else:
-        log.info("Running locally with polling...")
         try:
             bot.remove_webhook()
         except Exception:
