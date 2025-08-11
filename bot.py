@@ -1,12 +1,14 @@
-
 # -*- coding: utf-8 -*-
 """
-Refactored Telegram bot for Render (Webhook) or local (Polling).
-- Clean i18n (ar/en/tr/es/fr)
-- Main menu (daily / withdraw / withdraw status / stats / language)
+Telegram bot (Render-ready) — fixed:
+- i18n (ar/en/tr/es/fr)
+- Main menu: Daily / Withdraw / Withdrawal requests / Stats / Language
 - Withdraw via buttons or /withdraw <amount>
-- Optional Postgres key-value storage when DATABASE_URL is set (db_kv.py)
-- JSON file storage fallback (users.json, withdraw_requests.json, trades.json, daily_trade.txt)
+- Storage: DB (db_kv.py) if DATABASE_URL, else JSON files
+- Fixes:
+  * T() param renamed to avoid conflict
+  * Escaped <amount>, <text>, etc. for HTML parse mode
+  * __main__ runs Flask when WEBHOOK_URL is set (Render) to avoid polling conflict
 """
 import os, json, logging
 from datetime import datetime
@@ -37,7 +39,7 @@ USE_DB = bool(DATABASE_URL)
 if USE_DB:
     try:
         from db_kv import init_db, get_json as db_get_json, set_json as db_set_json
-        init_db()  # create table if not exists
+        init_db()
         log.info("DB storage enabled")
     except Exception as e:
         log.error("Failed to init DB storage, fallback to files: %s", e)
@@ -49,15 +51,14 @@ DATA_FILES = {
     "withdraw_log": "withdraw_log.json",
     "trades": "trades.json",
 }
+
 def load_json(name: str) -> Any:
-    """Load from DB (if enabled) else local JSON file; name is key or filename."""
     key = name
     if USE_DB:
         try:
             return db_get_json(key)
         except Exception as e:
             log.error("DB get_json error for key %s: %s", key, e)
-    # file fallback
     path = DATA_FILES.get(name.replace(".json",""), name)
     if not path.endswith(".json"):
         path = name
@@ -77,7 +78,6 @@ def save_json(name: str, data: Any) -> None:
             return
         except Exception as e:
             log.error("DB set_json error for key %s: %s", key, e)
-    # file fallback
     path = DATA_FILES.get(name.replace(".json",""), name)
     if not path.endswith(".json"):
         path = name
@@ -113,7 +113,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/id - عرض آيديك",
             "/balance - رصيدك",
             "/daily - صفقة اليوم",
-            "/withdraw <amount> - طلب سحب (مثال: /withdraw 50)"
+            "/withdraw &lt;amount&gt; - طلب سحب (مثال: /withdraw 50)"
         ],
         "daily_none": "لا يوجد صفقة اليوم حالياً.",
         "withdraw_enter": "❌ الصيغة: /withdraw 50",
@@ -139,7 +139,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/id - Show your ID",
             "/balance - Your balance",
             "/daily - Daily trade",
-            "/withdraw <amount> - Request withdrawal"
+            "/withdraw &lt;amount&gt; - Request withdrawal"
         ],
         "daily_none": "No daily trade yet.",
         "withdraw_enter": "❌ Format: /withdraw 50",
@@ -165,7 +165,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/id - ID'ni göster",
             "/balance - Bakiyen",
             "/daily - Günün işlemi",
-            "/withdraw <tutar> - Çekim isteği"
+            "/withdraw &lt;tutar&gt; - Çekim isteği"
         ],
         "daily_none": "Henüz günlük işlem yok.",
         "withdraw_enter": "❌ Format: /withdraw 50",
@@ -191,7 +191,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/id - Mostrar tu ID",
             "/balance - Tu saldo",
             "/daily - Operación del día",
-            "/withdraw <monto> - Solicitar retiro"
+            "/withdraw &lt;monto&gt; - Solicitar retiro"
         ],
         "daily_none": "Aún no hay operación del día.",
         "withdraw_enter": "❌ Formato: /withdraw 50",
@@ -217,7 +217,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/id - Afficher votre ID",
             "/balance - Votre solde",
             "/daily - Trade du jour",
-            "/withdraw <montant> - Demande de retrait"
+            "/withdraw &lt;montant&gt; - Demande de retrait"
         ],
         "daily_none": "Aucun trade du jour pour le moment.",
         "withdraw_enter": "❌ Format : /withdraw 50",
@@ -243,8 +243,8 @@ def set_lang(uid: str, lang: str) -> None:
     users[uid]["lang"] = lang if lang in LANGS else "ar"
     save_json("users.json", users)
 
-def T(uid: str, key: str, **kwargs) -> str:
-    lang = get_lang(uid)
+def T(user_id: str, key: str, **kwargs) -> str:
+    lang = get_lang(user_id)
     s = TEXT.get(lang, TEXT["ar"]).get(key, "")
     try:
         return s.format(**kwargs)
@@ -256,7 +256,7 @@ def ensure_user(chat_id: int) -> str:
     uid = str(chat_id)
     users = load_json("users.json") or {}
     if uid not in users:
-        users[uid] = {"balance": 0, "role": "admin" if chat_id == int(os.getenv("ADMIN_ID","1262317603")) else "user",
+        users[uid] = {"balance": 0, "role": "admin" if chat_id == ADMIN_ID else "user",
                       "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                       "lang": "ar"}
         save_json("users.json", users)
@@ -354,6 +354,40 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     save_json("withdraw_requests.json", withdraw_requests)
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
 
+# ---------- Fallback command router (handles weird slashes/RTL) ----------
+ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
+def norm_text(txt: str) -> str:
+    if not txt: return ""
+    t = txt.strip()
+    for ch in ZERO_WIDTH:
+        t = t.replace(ch, "")
+    return t.replace("／","/").replace("⁄","/")
+
+def dispatch_command(message: types.Message):
+    raw = norm_text(message.text or "")
+    cmd = raw.split()[0].lower()
+    log.info("DISPATCH raw=%r parsed_cmd=%s", raw, cmd)
+    if cmd in ("/start", "start"):
+        return cmd_start(message)
+    if cmd in ("/help", "help"):
+        return cmd_help(message)
+    if cmd in ("/id", "id"):
+        return cmd_id(message)
+    if cmd in ("/balance", "balance"):
+        return cmd_balance(message)
+    if cmd.startswith("/daily") or cmd=="daily":
+        return cmd_daily(message)
+    if cmd.startswith("/withdraw") or cmd=="withdraw":
+        return cmd_withdraw(message)
+    return
+
+@bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
+def any_command_like(message: types.Message):
+    try:
+        return dispatch_command(message)
+    except Exception as e:
+        log.error("fallback dispatch error: %s", e)
+
 # ---------- Callbacks ----------
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call: types.CallbackQuery):
@@ -433,64 +467,6 @@ def callbacks(call: types.CallbackQuery):
         mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
         return bot.send_message(call.message.chat.id, msg, reply_markup=mm)
 
-# ---------- Admin (minimal) ----------
-@bot.message_handler(commands=["setdaily"])
-def cmd_setdaily(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return
-    text = (message.text or "").split(" ", 1)
-    if len(text) < 2: return bot.reply_to(message, "Usage: /setdaily <text>")
-    save_daily_text(text[1].strip())
-    bot.reply_to(message, "✅ Daily trade updated.")
-
-@bot.message_handler(commands=["addbalance"])
-def cmd_addbalance(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return
-    parts = (message.text or "").split()
-    if len(parts) < 3: return bot.reply_to(message, "Usage: /addbalance <user_id> <amount>")
-    target, amount = parts[1], int(parts[2])
-    users = load_json("users.json") or {}
-    users.setdefault(target, {"balance": 0})
-    users[target]["balance"] = users[target].get("balance", 0) + amount
-    save_json("users.json", users)
-    bot.reply_to(message, f"✅ New balance for {target}: {users[target]['balance']}$")
-
-
-# ---------- Fallback command router (handles weird slashes/RTL) ----------
-ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
-def norm_text(txt: str) -> str:
-    if not txt: return ""
-    t = txt.strip()
-    for ch in ZERO_WIDTH:
-        t = t.replace(ch, "")
-    return t.replace("／","/").replace("⁄","/")
-
-def dispatch_command(message: types.Message):
-    raw = norm_text(message.text or "")
-    cmd = raw.split()[0].lower()
-    log.info("DISPATCH raw=%r parsed_cmd=%s", raw, cmd)
-    if cmd in ("/start", "start"):
-        return cmd_start(message)
-    if cmd in ("/help", "help"):
-        return cmd_help(message)
-    if cmd in ("/id", "id"):
-        return cmd_id(message)
-    if cmd in ("/balance", "balance"):
-        return cmd_balance(message)
-    if cmd.startswith("/daily") or cmd=="daily":
-        return cmd_daily(message)
-    if cmd.startswith("/withdraw") or cmd=="withdraw":
-        return cmd_withdraw(message)
-    # ignore others
-    return
-
-@bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
-def any_command_like(message: types.Message):
-    try:
-        return dispatch_command(message)
-    except Exception as e:
-        log.error("fallback dispatch error: %s", e)
 # ---------- Webhook & Server ----------
 @app.get("/")
 def health():
@@ -509,6 +485,7 @@ def webhook():
         log.error("Webhook error: %s", e)
     return "OK", 200
 
+# Set webhook automatically if WEBHOOK_URL present
 if WEBHOOK_URL:
     try:
         bot.remove_webhook()
@@ -524,9 +501,13 @@ if WEBHOOK_URL:
         log.error("set_webhook failed: %s", e)
 
 if __name__ == "__main__":
-    log.info("Running locally with polling...")
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    if WEBHOOK_URL:
+        # Run Flask on Render (bind to PORT) — avoids polling conflict
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    else:
+        log.info("Running locally with polling...")
+        try:
+            bot.remove_webhook()
+        except Exception:
+            pass
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
