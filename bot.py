@@ -169,6 +169,15 @@ def sub_remaining_str(uid: str) -> str:
     parts.append(f"{s:02d}s")
     return " ".join(parts)
 
+
+def build_lang_kb() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🇸🇦 العربية", callback_data="set_lang_ar"),
+           types.InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_en"))
+    kb.add(types.InlineKeyboardButton("🇹🇷 Türkçe", callback_data="set_lang_tr"),
+           types.InlineKeyboardButton("🇪🇸 Español", callback_data="set_lang_es"))
+    kb.add(types.InlineKeyboardButton("🇫🇷 Français", callback_data="set_lang_fr"))
+    return kb
 # ---------- i18n ----------
 LANGS = ["ar", "en", "tr", "es", "fr"]
 TEXT: Dict[str, Dict[str, Any]] = {
@@ -665,24 +674,13 @@ def cmd_start(message: types.Message):
     show_main_menu(message.chat.id)
 
 
+
 @bot.message_handler(commands=["lang"])
 def cmd_lang(message: types.Message):
     uid = ensure_user(message.chat.id)
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        # open inline menu instead
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("العربية", callback_data="set_lang_ar"),
-               types.InlineKeyboardButton("English", callback_data="set_lang_en"))
-        kb.add(types.InlineKeyboardButton("Türkçe", callback_data="set_lang_tr"),
-               types.InlineKeyboardButton("Español", callback_data="set_lang_es"))
-        kb.add(types.InlineKeyboardButton("Français", callback_data="set_lang_fr"))
-        return bot.reply_to(message, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=kb)
-    code = parts[1].lower()
-    if code not in ("ar","en","tr","es","fr"):
-        return bot.reply_to(message, "Use: /lang ar|en|tr|es|fr")
-    set_lang(uid, code)
-    return bot.reply_to(message, TEXT[get_lang(uid)]["lang_saved"])
+    # Always show the inline language menu
+    return bot.reply_to(message, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
+
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
     uid = ensure_user(message.chat.id)
