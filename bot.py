@@ -868,12 +868,12 @@ def callbacks(call: types.CallbackQuery):
         return bot.send_message(call.message.chat.id, "Nothing to cancel.")
 
     if data == "stats":
-        users = load_json("users.json") or {}
-        wreq = load_json("withdraw_requests.json") or {}
-        msg = f"👥 Users: {len(users)}\n💼 Withdraw requests: {len(wreq)}"
+        # Show per-user statistics instead of admin counters
+        txt = _stats_text(uid, uid)
         mm = types.InlineKeyboardMarkup()
-        mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, msg, reply_markup=mm)
+        mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
+               types.InlineKeyboardButton("🔙", callback_data="go_back"))
+        return bot.send_message(call.message.chat.id, txt, reply_markup=mm)
 
     if data == "deposit":
         tt = TEXT[get_lang(uid)]
@@ -925,6 +925,7 @@ def norm_text(txt: str) -> str:
         t = t.replace(ch, "")
     return t.replace("／","/").replace("⁄","/")
 
+
 def dispatch_command(message: types.Message):
     raw = norm_text(message.text or "")
     cmd = raw.split()[0].lower()
@@ -937,11 +938,36 @@ def dispatch_command(message: types.Message):
         return cmd_id(message)
     if cmd in ("/balance", "balance"):
         return cmd_balance(message)
-    if cmd.startswith("/daily") or cmd=="daily":
+    if cmd.startswith("/daily") or cmd == "daily":
         return cmd_daily(message)
-    if cmd.startswith("/withdraw") or cmd=="withdraw":
+    if cmd.startswith("/withdraw") or cmd == "withdraw":
         return cmd_withdraw(message)
+
+    # --- New commands passthrough ---
+    if cmd in ("/broadcast", "broadcast"):
+        return cmd_broadcast(message)
+    if cmd in ("/addmoney", "/finemoney", "addmoney", "finemoney"):
+        return cmd_money(message)
+    if cmd in ("/setdaily", "setdaily"):
+        return cmd_setdaily(message)
+    if cmd in ("/cleardaily", "cleardaily"):
+        return cmd_cleardaily(message)
+    if cmd in ("/win", "win", "/loss", "loss"):
+        return cmd_win_loss(message)
+    if cmd in ("/record_set", "record_set"):
+        return cmd_record_set(message)
+    if cmd in ("/record_done", "record_done", "/cancel", "cancel"):
+        # let cancel handler run; fallback to calling it here
+        try:
+            return cmd_cancel(message)
+        except Exception:
+            return
+    if cmd in ("/mystats", "mystats"):
+        return cmd_mystats(message)
+    if cmd in ("/userstats", "userstats"):
+        return cmd_userstats(message)
     return
+
 
 @bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
 def any_command_like(message: types.Message):
