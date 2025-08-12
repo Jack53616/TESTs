@@ -664,6 +664,25 @@ def cmd_start(message: types.Message):
         return
     show_main_menu(message.chat.id)
 
+
+@bot.message_handler(commands=["lang"])
+def cmd_lang(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        # open inline menu instead
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("العربية", callback_data="set_lang_ar"),
+               types.InlineKeyboardButton("English", callback_data="set_lang_en"))
+        kb.add(types.InlineKeyboardButton("Türkçe", callback_data="set_lang_tr"),
+               types.InlineKeyboardButton("Español", callback_data="set_lang_es"))
+        kb.add(types.InlineKeyboardButton("Français", callback_data="set_lang_fr"))
+        return bot.reply_to(message, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=kb)
+    code = parts[1].lower()
+    if code not in ("ar","en","tr","es","fr"):
+        return bot.reply_to(message, "Use: /lang ar|en|tr|es|fr")
+    set_lang(uid, code)
+    return bot.reply_to(message, TEXT[get_lang(uid)]["lang_saved"])
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
     uid = ensure_user(message.chat.id)
