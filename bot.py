@@ -837,6 +837,7 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
 
 # ---------- Callbacks ----------
+
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
@@ -845,8 +846,20 @@ def callbacks(call: types.CallbackQuery):
         bot.answer_callback_query(call.id)
     except Exception:
         pass
-    # Allow language switching even if subscription is inactive
 
+    if data.startswith("set_lang_"):
+        code = data.split("_")[-1]
+        if code in ("ar","en","tr","es","fr"):
+            set_lang(uid, code)
+            try:
+                bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
+            except Exception:
+                pass
+            try:
+                show_main_menu(call.message.chat.id)
+            except Exception:
+                pass
+        return
 
     if data == "daily_trade":
         daily = load_daily_text() or TEXT[get_lang(uid)]["daily_none"]
@@ -863,8 +876,8 @@ def callbacks(call: types.CallbackQuery):
         mm = types.InlineKeyboardMarkup()
         found = False
         for req_id, req in withdraw_requests.items():
-            if req["user_id"] == uid and req["status"] == "بانتظار الموافقة":
-                mm.add(types.InlineKeyboardButton(f"❌ cancel {req['amount']}$", callback_data=f"cancel_{req_id}"))
+            if req.get("user_id") == uid and req.get("status") == "بانتظار الموافقة":
+                mm.add(types.InlineKeyboardButton(f"❌ cancel {req.get('amount',0)}$", callback_data=f"cancel_{req_id}"))
                 found = True
         mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
         msg = TEXT[get_lang(uid)]["requests_waiting"] if found else TEXT[get_lang(uid)]["no_requests"]
@@ -872,19 +885,19 @@ def callbacks(call: types.CallbackQuery):
 
     if data.startswith("withdraw_"):
         try:
-            amount = int(data.split("_")[1])
+            amount = int(data.split("_", 1)[1])
         except Exception:
             amount = 0
         return create_withdraw_request(call.message.chat.id, uid, amount)
 
     if data.startswith("cancel_"):
-        req_id = data.split("_")[1]
+        req_id = data.split("_", 1)[1]
         withdraw_requests = load_json("withdraw_requests.json") or {}
         req = withdraw_requests.get(req_id)
-        if req and req["user_id"] == uid and req["status"] == "بانتظار الموافقة":
+        if req and req.get("user_id") == uid and req.get("status") == "بانتظار الموافقة":
             users = load_json("users.json") or {}
             users.setdefault(uid, {"balance": 0})
-            users[uid]["balance"] = users[uid].get("balance", 0) + int(req["amount"])
+            users[uid]["balance"] = users[uid].get("balance", 0) + int(req.get("amount", 0))
             save_json("users.json", users)
             req["status"] = "ملغاة"
             save_json("withdraw_requests.json", withdraw_requests)
@@ -892,7 +905,6 @@ def callbacks(call: types.CallbackQuery):
         return bot.send_message(call.message.chat.id, "Nothing to cancel.")
 
     if data == "stats":
-        # Show per-user statistics instead of admin counters
         txt = _stats_text(uid, uid)
         mm = types.InlineKeyboardMarkup()
         mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
@@ -939,32 +951,6 @@ def callbacks(call: types.CallbackQuery):
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(tt["contact_us"], url="https://t.me/qlsupport"))
         return bot.send_message(call.message.chat.id, tt["support_msg"], reply_markup=kb)
-
-
-# --- Language menu
-if data == "lang_menu":
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("العربية", callback_data="set_lang_ar"),
-           types.InlineKeyboardButton("English", callback_data="set_lang_en"))
-    kb.add(types.InlineKeyboardButton("Türkçe", callback_data="set_lang_tr"),
-           types.InlineKeyboardButton("Español", callback_data="set_lang_es"))
-    kb.add(types.InlineKeyboardButton("Français", callback_data="set_lang_fr"))
-    return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=kb)
-
-if data.startswith("set_lang_"):
-    code = data.split("_")[-1]
-    if code in ("ar","en","tr","es","fr"):
-        set_lang(uid, code)
-        # confirm + refresh main menu
-        try:
-            bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
-        except Exception:
-            pass
-        try:
-            show_main_menu(call.message.chat.id)
-        except Exception:
-            pass
-    return
 
 # ---------- Fallback command router (handles weird slashes/RTL) ----------
 ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
