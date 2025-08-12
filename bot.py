@@ -573,11 +573,16 @@ def require_active_or_ask(chat_id: int) -> bool:
     tt = TEXT[get_lang(uid)]
     msg = T(uid, "key_expired") if users.get(uid, {}).get("sub") else T(uid, "need_key")
 
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(tt["btn_buy"], url="https://t.me/qlsupport"))
-    kb.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
-    bot.send_message(chat_id, msg, reply_markup=kb)
+    show_need_key_prompt(chat_id, uid)
     return False
+
+
+def show_need_key_prompt(chat_id: int, uid: str):
+    """Show the 'enter key' prompt with Buy+Language buttons (for inactive users)."""
+    tt = TEXT[get_lang(uid)]
+    users = load_json("users.json") or {}
+    msg = T(uid, "key_expired") if users.get(uid, {}).get("sub") else T(uid, "need_key")
+    show_need_key_prompt(chat_id, uid)
 
 def _rand_key(n=4) -> str:
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
@@ -793,39 +798,13 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
-
-    # gate on subscription
-    if not is_sub_active(uid):
-        require_active_or_ask(call.message.chat.id)
-        try:
-            bot.answer_callback_query(call.id)
-        except Exception:
-            pass
-        return
-
     data = call.data or ""
     try:
         bot.answer_callback_query(call.id)
     except Exception:
         pass
+    # Allow language switching even if subscription is inactive
 
-    if data == "go_back":
-        return show_main_menu(call.message.chat.id)
-
-    if data == "lang_menu":
-        mm = types.InlineKeyboardMarkup()
-        mm.add(types.InlineKeyboardButton("العربية 🇸🇦", callback_data="set_lang_ar"),
-               types.InlineKeyboardButton("English 🇬🇧", callback_data="set_lang_en"))
-        mm.add(types.InlineKeyboardButton("Türkçe 🇹🇷", callback_data="set_lang_tr"),
-               types.InlineKeyboardButton("Español 🇪🇸", callback_data="set_lang_es"))
-        mm.add(types.InlineKeyboardButton("Français 🇫🇷", callback_data="set_lang_fr"))
-        return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=mm)
-
-    if data.startswith("set_lang_"):
-        lang = data.split("_")[-1]
-        set_lang(uid, lang)
-        bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
-        return show_main_menu(call.message.chat.id)
 
     if data == "daily_trade":
         daily = load_daily_text() or TEXT[get_lang(uid)]["daily_none"]
@@ -952,6 +931,227 @@ def any_command_like(message: types.Message):
         return dispatch_command(message)
     except Exception as e:
         log.error("fallback dispatch error: %s", e)
+
+
+
+# ---------- Broadcast, Money, Daily, and Stats (per-user) ----------
+
+# In-memory state for admin broadcast and record mode; persisted record mode also saved to users.json meta if needed.
+_BROADCAST_WAIT = set()          # admins waiting to send photo with caption
+_RECORD_MODE = {}                # admin_id -> target_user_id (str)
+
+def _all_user_ids() -> list:
+    users = load_json("users.json") or {}
+    return [int(uid) for uid in users.keys()]
+
+def _get_stats():
+    return load_json("stats.json") or {}
+
+def _save_stats(data):
+    save_json("stats.json", data)
+
+def _add_stat(user_id: str, kind: str, amount: float):
+    stats = _get_stats()
+    u = stats.setdefault(user_id, {"total_win": 0.0, "total_loss": 0.0, "history": []})
+    if kind == "win":
+        u["total_win"] = float(u.get("total_win", 0.0)) + float(amount)
+    else:
+        u["total_loss"] = float(u.get("total_loss", 0.0)) + float(amount)
+    u["history"].insert(0, {
+        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "kind": kind,
+        "amount": float(amount),
+    })
+    u["history"] = u["history"][:100]  # keep last 100
+    _save_stats(stats)
+    return u
+
+def _stats_text(uid_viewer: str, target_uid: str):
+    stats = _get_stats()
+    u = stats.get(target_uid, {"total_win": 0.0, "total_loss": 0.0, "history": []})
+    total_win = float(u.get("total_win", 0.0))
+    total_loss = float(u.get("total_loss", 0.0))
+    cnt_win = sum(1 for h in u.get("history", []) if h.get("kind") == "win")
+    cnt_loss = sum(1 for h in u.get("history", []) if h.get("kind") == "loss")
+    net = total_win - total_loss
+    header = T(uid_viewer, "stats_title") if uid_viewer == target_uid else f"📊 إحصائيات المستخدم {target_uid}"
+    lines = [header,
+             T(uid_viewer, "stats_wins", sum=f"{total_win:.2f}", count=cnt_win),
+             T(uid_viewer, "stats_losses", sum=f"{total_loss:.2f}", count=cnt_loss),
+             T(uid_viewer, "stats_net", net=f"{net:.2f}")
+    ]
+    if not u.get("history"):
+        lines.append(T(uid_viewer, "stats_no_data"))
+    else:
+        for h in u["history"][:10]:
+            at = str(h.get("ts","")) .replace("T"," ")
+            amount_str = f"{float(h.get('amount',0)):.2f}"
+            if h.get("kind") == "win":
+                lines.append(T(uid_viewer, "stats_line_win", at=at, amount=amount_str))
+            else:
+                lines.append(T(uid_viewer, "stats_line_loss", at=at, amount=amount_str))
+    return "\n".join(lines)
+# ---- /broadcast ----
+@bot.message_handler(commands=["broadcast"])
+def cmd_broadcast(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    _BROADCAST_WAIT.add(message.from_user.id)
+    return bot.reply_to(message, "📣 ابعت «صورة مع كابتشن» لإرسالها للجميع.\nاكتب /cancel للإلغاء.")
+
+@bot.message_handler(commands=["cancel"])
+def cmd_cancel(message: types.Message):
+    if message.from_user.id in _BROADCAST_WAIT:
+        _BROADCAST_WAIT.discard(message.from_user.id)
+        return bot.reply_to(message, "✅ تم الإلغاء.")
+    if _RECORD_MODE.get(message.from_user.id):
+        _RECORD_MODE.pop(message.from_user.id, None)
+        return bot.reply_to(message, "✅ خرجت من وضع التسجيل.")
+    # else ignore
+
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message: types.Message):
+    # handle broadcast photo+caption
+    uid = ensure_user(message.chat.id)
+    if message.from_user.id in _BROADCAST_WAIT and is_admin(uid):
+        _BROADCAST_WAIT.discard(message.from_user.id)
+        users = _all_user_ids()
+        if not users:
+            return bot.reply_to(message, "⚠️ ما في مستخدمين لإرسال الرسالة.")
+        # send by file_id to each
+        file_id = message.photo[-1].file_id
+        caption = message.caption or ""
+        sent = 0
+        for cid in users:
+            try:
+                bot.send_photo(cid, file_id, caption=caption)
+                sent += 1
+            except Exception as e:
+                pass
+        return bot.reply_to(message, f"✅ تم الإرسال للجميع: {sent} مستخدم.")
+    # else ignore other photos
+
+# ---- /addmoney & /finemoney ----
+@bot.message_handler(commands=["addmoney","finemoney"])
+def cmd_money(message: types.Message):
+    uid_admin = ensure_user(message.chat.id)
+    if not is_admin(uid_admin):
+        return bot.reply_to(message, T(uid_admin, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return bot.reply_to(message, "صيغة الاستعمال: /addmoney <user_id> <amount> أو /finemoney <user_id> <amount>")
+    target_uid = parts[1].strip()
+    try:
+        amount = float(parts[2])
+    except Exception:
+        return bot.reply_to(message, "❌ المبلغ غير صالح.")
+    users = load_json("users.json") or {}
+    if target_uid not in users:
+        return bot.reply_to(message, "❌ المستخدم غير موجود.")
+    bal = float(users[target_uid].get("balance", 0))
+    if message.text.startswith("/finemoney"):
+        bal -= amount
+        amount_applied = -amount
+    else:
+        bal += amount
+        amount_applied = amount
+    users[target_uid]["balance"] = round(bal, 2)
+    save_json("users.json", users)
+    return bot.reply_to(message, f"✅ رصيد {target_uid} صار: {users[target_uid]['balance']}$ (تغيير: {amount_applied:+.2f}$)")
+
+# ---- /setdaily & /cleardaily ----
+@bot.message_handler(commands=["setdaily"])
+def cmd_setdaily(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    text_part = (message.text or "").split(maxsplit=1)
+    if len(text_part) < 2:
+        return bot.reply_to(message, "اكتب: /setdaily <نص صفقات اليوم>")
+    save_daily_text(text_part[1])
+    return bot.reply_to(message, "✅ تم حفظ صفقات اليوم.")
+
+@bot.message_handler(commands=["cleardaily"])
+def cmd_cleardaily(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    save_daily_text("")
+    return bot.reply_to(message, T(uid, "cleardaily_ok"))
+
+# ---- Stats: /win /loss /record_set /record_done /mystats /userstats ----
+@bot.message_handler(commands=["win","loss"])
+def cmd_win_loss(message: types.Message):
+    uid_admin = ensure_user(message.chat.id)
+    if not is_admin(uid_admin):
+        return bot.reply_to(message, T(uid_admin, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return bot.reply_to(message, "صيغة: /win <user_id> <amount> أو /loss <user_id> <amount>")
+    target_uid = parts[1].strip()
+    try:
+        amt = float(parts[2])
+    except Exception:
+        return bot.reply_to(message, "❌ المبلغ غير صالح.")
+    kind = "win" if message.text.startswith("/win") else "loss"
+    _add_stat(target_uid, kind, amt)
+    return bot.reply_to(message, f"✅ تم تسجيل {'ربح' if kind=='win' else 'خسارة'} {amt}$ للمستخدم {target_uid}.")
+
+@bot.message_handler(commands=["record_set"])
+def cmd_record_set(message: types.Message):
+    uid_admin = ensure_user(message.chat.id)
+    if not is_admin(uid_admin):
+        return bot.reply_to(message, T(uid_admin, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        return bot.reply_to(message, "صيغة: /record_set <user_id>")
+    target_uid = parts[1].strip()
+    _RECORD_MODE[message.from_user.id] = target_uid
+    return bot.reply_to(message, f"📝 وضع التسجيل شغّال للمستخدم {target_uid}. اكتب أرقام مثل 10 أو 10- أو -7. اكتب /record_done للخروج.")
+
+@bot.message_handler(commands=["record_done"])
+def cmd_record_done(message: types.Message):
+    if _RECORD_MODE.pop(message.from_user.id, None):
+        return bot.reply_to(message, "✅ تم إنهاء وضع التسجيل.")
+    # else ignore
+
+@bot.message_handler(commands=["mystats"])
+def cmd_mystats(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    return bot.reply_to(message, _stats_text(uid, uid))
+
+@bot.message_handler(commands=["userstats"])
+def cmd_userstats(message: types.Message):
+    uid_admin = ensure_user(message.chat.id)
+    if not is_admin(uid_admin):
+        return bot.reply_to(message, T(uid_admin, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        return bot.reply_to(message, "صيغة: /userstats <user_id>")
+    target_uid = parts[1].strip()
+    return bot.reply_to(message, _stats_text(uid_admin, target_uid))
+
+# ---- Record mode free-text numbers (only when active) ----
+@bot.message_handler(func=lambda m: _RECORD_MODE.get(m.from_user.id) is not None, content_types=['text'])
+def record_mode_handler(message: types.Message):
+    uid_admin = ensure_user(message.chat.id)
+    if not is_admin(uid_admin):
+        return
+    target_uid = _RECORD_MODE.get(message.from_user.id)
+    raw = (message.text or "").strip().replace(" ", "")
+    m = re.match(r"^(-?\d+(\.\d+)?)([\+\-]?)$", raw)
+    if not m:
+        return bot.reply_to(message, "❗ اكتب رقم مثل 10 أو 10- أو -7. اكتب /record_done للخروج.")
+    val = float(m.group(1))
+    sign = m.group(3)
+    if sign == "-" or val < 0:
+        kind = "loss"; amt = abs(val)
+    else:
+        kind = "win"; amt = abs(val)
+    u = _add_stat(target_uid, kind, amt)
+    net = float(u.get("total_win",0.0)) - float(u.get("total_loss",0.0))
+    return bot.reply_to(message, f"✅ تم تسجيل {'ربح' if kind=='win' else 'خسارة'} {amt}$ للمستخدم {target_uid}. الصافي الآن: {net:.2f}$.")
 
 # ---------- Key entry via plain text when inactive ----------
 @bot.message_handler(func=lambda m: True, content_types=['text'])
