@@ -675,11 +675,12 @@ def cmd_start(message: types.Message):
 
 
 
+
 @bot.message_handler(commands=["lang"])
 def cmd_lang(message: types.Message):
     uid = ensure_user(message.chat.id)
-    # Always show the inline language menu
     return bot.reply_to(message, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
+
 
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
@@ -835,6 +836,36 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
 
 # ---------- Callbacks ----------
+
+
+# --- Language callbacks (specific handlers, run before generic) ---
+@bot.callback_query_handler(func=lambda c: c.data=="lang_menu")
+def cb_lang_menu(call: types.CallbackQuery):
+    uid = ensure_user(call.from_user.id)
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("set_lang_"))
+def cb_set_lang(call: types.CallbackQuery):
+    uid = ensure_user(call.from_user.id)
+    code = (call.data or "").split("_")[-1]
+    if code in ("ar","en","tr","es","fr"):
+        set_lang(uid, code)
+    try:
+        bot.answer_callback_query(call.id, text="Language updated")
+    except Exception:
+        pass
+    try:
+        bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
+    except Exception:
+        pass
+    try:
+        show_main_menu(call.message.chat.id)
+    except Exception:
+        pass
 
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call: types.CallbackQuery):
