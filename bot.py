@@ -1304,31 +1304,44 @@ def webhook():
         return "OK", 200
     try:
         raw = request.get_data().decode("utf-8")
-        if not raw: return "OK", 200
+        if not raw:
+            return "OK", 200
         update = telebot.types.Update.de_json(raw)
         bot.process_new_updates([update])
     except Exception as e:
         log.error("Webhook error: %s", e)
     return "OK", 200
 
+# Decide mode based on env
+from threading import Thread
+
+def start_polling():
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+    log.info("Starting polling...")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
 if WEBHOOK_URL:
+    # Webhook mode (Web Service): set webhook and RUN FLASK on $PORT
     try:
         bot.remove_webhook()
     except Exception:
         pass
     url = f"{WEBHOOK_URL}/{API_TOKEN}"
     try:
-        bot.set_webhook(url=url, allowed_updates=[
-            "message","callback_query","my_chat_member","chat_member","edited_message"
-        ])
+        bot.set_webhook(
+            url=url,
+            allowed_updates=["message","callback_query","my_chat_member","chat_member","edited_message"]
+        )
         log.info("Webhook set to: %s", url)
     except Exception as e:
         log.error("set_webhook failed: %s", e)
-
-if __name__ == "__main__":
-    log.info("Running locally with polling...")
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    # IMPORTANT: bind to PORT so Render sees an open port
+    app.run(host="0.0.0.0", port=PORT)
+else:
+    # Polling mode but still bind a port for Render (optional health)
+    # Run polling in a background thread, Flask in main thread
+    Thread(target=start_polling, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT)
