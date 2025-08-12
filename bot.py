@@ -12,7 +12,7 @@ Telegram bot (Render-ready) — Subscription Keys + Buy button + i18n
 - Storage: DB (db_kv.py) if DATABASE_URL, else JSON files
 - Webhook via Flask (Render)
 """
-import os, json, logging, random, string
+import os, json, logging, random, string, re
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from flask import Flask, request
@@ -28,6 +28,13 @@ log = logging.getLogger("bot")
 API_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
 WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "").rstrip("/")
 ADMIN_ID      = int(os.getenv("ADMIN_ID", "1262317603"))
+ADMIN_IDS    = {ADMIN_ID}
+try:
+    _ids_env = os.getenv("ADMIN_IDS", "").strip()
+    if _ids_env:
+        ADMIN_IDS |= {int(x) for x in _ids_env.replace(' ', '').split(',') if x}
+except Exception:
+    pass
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
 WEBSITE_URL   = os.getenv("WEBSITE_URL", "").strip()
 PORT          = int(os.getenv("PORT", "10000"))
@@ -517,14 +524,25 @@ def ensure_user(chat_id: int) -> str:
     if uid not in users:
         users[uid] = {
             "balance": 0,
-            "role": "admin" if chat_id == ADMIN_ID else "user",
+            "role": "admin" if chat_id in ADMIN_IDS else "user",
             "created_at": _now_str(),
             "lang": "ar"
         }
         save_json("users.json", users)
+    else:
+        # upgrade to admin if now in ADMIN_IDS
+        if chat_id in ADMIN_IDS and users.get(uid, {}).get("role") != "admin":
+            users[uid]["role"] = "admin"
+            save_json("users.json", users)
     return uid
 
 def is_admin(uid: str) -> bool:
+    try:
+        # quick check: if uid numeric and belongs to ADMIN_IDS
+        if int(uid) in ADMIN_IDS:
+            return True
+    except Exception:
+        pass
     users = load_json("users.json") or {}
     return (users.get(uid, {}) or {}).get("role") == "admin"
 
