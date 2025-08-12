@@ -600,14 +600,14 @@ def show_need_key_prompt(chat_id: int, uid: str):
     """Show the 'enter key' prompt with Buy+Language buttons (for inactive users)."""
     tt = TEXT[get_lang(uid)]
     kb = types.InlineKeyboardMarkup()
-    # Buy button goes to support chat if set, language button opens lang menu
     kb.add(types.InlineKeyboardButton(tt["btn_buy"], url="https://t.me/qlsupport"))
     kb.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
     msg = T(uid, "key_expired") if (load_json("users.json") or {}).get(uid, {}).get("sub") else T(uid, "need_key")
     bot.send_message(chat_id, msg, reply_markup=kb)
 
+
 def _rand_key(n=4) -> str:
-(n=4) -> str:
+    import random, string
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
 
 def generate_keys(k_type: str, count: int) -> List[str]:
@@ -1061,8 +1061,33 @@ def cmd_cancel(message: types.Message):
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(message: types.Message):
+    # handle broadcast photo+caption
+    uid = ensure_user(message.chat.id)
+    if message.from_user.id in _BROADCAST_WAIT and is_admin(uid):
+        _BROADCAST_WAIT.discard(message.from_user.id)
+        users = _all_user_ids()
+        if not users:
+            return bot.reply_to(message, "⚠️ ما في مستخدمين لإرسال الرسالة.")
+        # send by file_id to each
+        file_id = message.photo[-1].file_id
+        caption = message.caption or ""
+        sent = 0
+        for cid in users:
+            try:
+                bot.send_photo(cid, file_id, caption=caption)
+                sent += 1
+            except Exception:
+                pass
+        return bot.reply_to(message, f"✅ تم الإرسال للجميع: {sent} مستخدم.")
+
 @bot.message_handler(func=lambda m: m.from_user.id in _BROADCAST_WAIT, content_types=['text'])
 def handle_broadcast_text(message: types.Message):
+    # User is in broadcast mode but sent text — instruct to send a photo with caption
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return
+    bot.reply_to(message, "ℹ️ أنت في وضع الإرسال. ابعت *صورة مع كابتشن* ليتم البث للجميع، أو اكتب /cancel للإلغاء.")
+
     # User is in broadcast mode but sent text — instruct to send a photo with caption
     uid = ensure_user(message.chat.id)
     if not is_admin(uid):
