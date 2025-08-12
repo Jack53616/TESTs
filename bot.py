@@ -1,24 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Telegram bot (Render-ready) — with Subscription Keys
-New:
+Telegram bot (Render-ready) — Subscription Keys + Buy button + i18n
+- Fixes: comma in TEXT, HTML escaping, no T() arg collision, no polling if webhook.
 - Subscription keys (daily/weekly/monthly/yearly/lifetime)
 - On /start asks for key if user not subscribed (or expired)
-- Admin: /genkey <type> <count> , /delkey <key> , /delsub <user_id> , /subinfo <user_id?>
-- Any message (without /) is treated as a key attempt when user not subscribed
-- All menus/callbacks/commands blocked until subscription is active
-
-Kept features:
+- "🛒 Buy" button opens support chat (@qlsupport) when subscription inactive
+- Admin: /genkey <type> <count>, /delkey <key>, /delsub <user_id>, /subinfo <user_id?>
+- Any message (without /) is treated as a key attempt when subscription inactive
 - i18n (ar/en/tr/es/fr)
 - Main menu: Daily / Withdraw / Withdrawal requests / Stats / Language / Deposit / Website / Support
 - Withdraw via buttons or /withdraw <amount>
-- Per-user stats & admin record mode
-- Broadcast for admin
-- Non-command messages relayed to admin (only when subscribed; otherwise treated as subscription key)
 - Storage: DB (db_kv.py) if DATABASE_URL, else JSON files
-- Webhook or polling (no conflict)
+- Webhook via Flask (Render)
 """
-import os, json, logging, html
+import os, json, logging, html, random, string
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from flask import Flask, request
@@ -35,8 +30,8 @@ API_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
 WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "").rstrip("/")
 ADMIN_ID      = int(os.getenv("ADMIN_ID", "1262317603"))
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
-SUPPORT_USER  = os.getenv("SUPPORT_USERNAME", "qlsupport").lstrip("@") or "qlsupport"
 WEBSITE_URL   = os.getenv("WEBSITE_URL", "").strip()
+PORT          = int(os.getenv("PORT", "10000"))
 
 if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -60,7 +55,6 @@ DATA_FILES = {
     "withdraw_requests": "withdraw_requests.json",
     "withdraw_log": "withdraw_log.json",
     "trades": "trades.json",
-    "stats": "stats.json",
     "keys": "keys.json",
 }
 
@@ -96,6 +90,12 @@ def save_json(name: str, data: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def _now() -> datetime:
+    return datetime.now()
+
+def _now_str() -> str:
+    return _now().strftime("%Y-%m-%d %H:%M:%S")
+
 def load_daily_text() -> str:
     if os.path.exists("daily_trade.txt"):
         try:
@@ -109,12 +109,38 @@ def save_daily_text(text: str) -> None:
     with open("daily_trade.txt", "w", encoding="utf-8") as f:
         f.write((text or "").strip())
 
+# ---------- Subscription Keys ----------
+DURATIONS = {
+    "daily": 1,
+    "weekly": 7,
+    "monthly": 30,
+    "yearly": 365,
+    "lifetime": None,
+}
+
+def _key_store() -> Dict[str, Any]:
+    return load_json("keys.json") or {}
+
+def _save_keys(data: Dict[str, Any]) -> None:
+    save_json("keys.json", data)
+
+def is_sub_active(uid: str) -> bool:
+    users = load_json("users.json") or {}
+    sub = (users.get(uid, {}) or {}).get("sub")
+    if not sub: return False
+    exp = sub.get("expire_at")
+    if exp is None:  # lifetime
+        return True
+    try:
+        return datetime.strptime(exp, "%Y-%m-%d %H:%M:%S") > _now()
+    except Exception:
+        return False
 
 # ---------- i18n ----------
 LANGS = ["ar", "en", "tr", "es", "fr"]
 TEXT: Dict[str, Dict[str, Any]] = {
     "ar": {
-        "welcome": "👋 أهلاً بك في بوت التداول\n\n💰 رصيدك: {balance}$\n🆔 آيديك: {uid}",
+        "welcome": "👋 أهلاً بك في بوت التداول\n\n💰 رصيدك: {balance}$\n🆔 آيديك: {user_id}",
         "need_key": "🔑 الرجاء إدخال مفتاح الاشتراك لتفعيل البوت.\nأنواع المفاتيح: يومي / أسبوعي / شهري / سنوي / دائم",
         "key_ok": "✅ تم تفعيل اشتراكك ({stype}). ينتهي في: {exp}\nاستخدم /start لفتح القائمة.",
         "key_ok_life": "✅ تم تفعيل اشتراكك ({stype} — دائم). استمتع!\nاستخدم /start لفتح القائمة.",
@@ -128,6 +154,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_deposit": "💳 الإيداع",
         "btn_website": "🌍 موقعنا",
         "btn_support": "📞 تواصل مع الدعم",
+        "btn_buy": "🛒 شراء اشتراك",
         "help_title": "🛠 الأوامر المتاحة:",
         "help_public": [
             "/start - القائمة الرئيسية",
@@ -135,8 +162,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/balance - رصيدك",
             "/daily - صفقة اليوم",
             "/withdraw &lt;amount&gt; - طلب سحب (مثال: /withdraw 50)",
-            "/mystats - إحصائياتي",
-            "btn_buy": "🛒 شراء اشتراك"        
+            "/mystats - إحصائياتي"
         ],
         "daily_none": "لا يوجد صفقة اليوم حالياً.",
         "cleardaily_ok": "🧹 تم مسح صفقة اليوم.",
@@ -170,34 +196,9 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_no_data": "لا توجد عمليات حتى الآن.",
         "stats_line_win": "{at} — ربح +{amount}$",
         "stats_line_loss": "{at} — خسارة -{amount}$",
-        # admin / record
-        "admin_only": "🚫 هذا الأمر للأدمن فقط.",
-        "record_target_is": "🎯 تم اختيار المستخدم: {uid}. أرسل أرقام مثل 10 (ربح) أو 10- (خسارة).",
-        "record_mode_on": "🟢 تم تفعيل وضع التسجيل للمستخدم {uid}.",
-        "record_mode_off": "🛑 تم إنهاء وضع التسجيل.",
-        "record_saved_win": "✅ تم تسجيل ربح +{amount}$ للمستخدم {uid} — {at}",
-        "record_saved_loss": "✅ تم تسجيل خسارة -{amount}$ للمستخدم {uid} — {at}",
-        "record_invalid_amount": "❌ الرجاء إرسال رقم صحيح (مثال: 10 أو 10-).",
-        "userstats_header": "📊 إحصائيات المستخدم {uid}",
-        # balance link / deduct
-        "balance_linked_user": "✅ تم ربط البوت بحسابك التداول.\n💰 رصيدك الآن: {bal}$",
-        "balance_updated_admin": "✅ تم تحديث رصيد {uid}. الرصيد الآن: {bal}$",
-        "balance_deduct_user": "🔻 تم خصم {amount}$ من رصيدك.\n💰 رصيدك الآن: {bal}$",
-        "balance_deduct_admin": "🔻 تم الخصم من رصيد {uid}. الرصيد الآن: {bal}$",
-        # broadcast
-        "broadcast_need_text": "❌ الصيغة: /broadcast النص",
-        "broadcast_done": "📢 تم الإرسال: نجاح {ok} / فشل {fail}",
-        "relayed_to_admin": "📨 تم إرسال رسالتك للإدارة.",
-        # subs admin
-        "genkey_ok": "🔐 تم توليد {n} مفتاح من نوع {t}.\nأول مفتاح: <code>{first}</code>",
-        "delkey_ok": "🗑️ تم حذف المفتاح.",
-        "delkey_notfound": "❌ المفتاح غير موجود.",
-        "delsub_ok": "🗑️ تم حذف اشتراك المستخدم {uid}.",
-        "subinfo_line": "👤 {uid} — النوع: {t}, ينتهي: {exp}",
-        "subinfo_none": "لا يوجد اشتراك.",
     },
     "en": {
-        "welcome": "👋 Welcome to the trading bot\n\n💰 Your balance: {balance}$\n🆔 Your ID: {uid}",
+        "welcome": "👋 Welcome to the trading bot\n\n💰 Your balance: {balance}$\n🆔 Your ID: {user_id}",
         "need_key": "🔑 Please enter your subscription key to activate the bot.\nTypes: daily / weekly / monthly / yearly / lifetime",
         "key_ok": "✅ Your subscription ({stype}) is activated. Expires at: {exp}\nUse /start to open the menu.",
         "key_ok_life": "✅ Your subscription ({stype}, lifetime) is activated. Enjoy!\nUse /start to open the menu.",
@@ -211,6 +212,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_deposit": "💳 Deposit",
         "btn_website": "🌍 Website",
         "btn_support": "📞 Contact support",
+        "btn_buy": "🛒 Buy subscription",
         "help_title": "🛠 Available commands:",
         "help_public": [
             "/start - Main menu",
@@ -218,8 +220,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/balance - Your balance",
             "/daily - Daily trade",
             "/withdraw &lt;amount&gt; - Request withdrawal",
-            "/mystats - My stats",
-            "btn_buy": "🛒 Buy subscription"
+            "/mystats - My stats"
         ],
         "daily_none": "No daily trade yet.",
         "cleardaily_ok": "🧹 Daily trade cleared.",
@@ -250,30 +251,9 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_no_data": "No operations yet.",
         "stats_line_win": "{at} — Win +{amount}$",
         "stats_line_loss": "{at} — Loss -{amount}$",
-        "admin_only": "🚫 Admin only.",
-        "record_target_is": "🎯 Target user: {uid}. Send numbers like 10 (win) or 10- (loss).",
-        "record_mode_on": "🟢 Record mode ON for user {uid}.",
-        "record_mode_off": "🛑 Record mode OFF.",
-        "record_saved_win": "✅ Recorded WIN +{amount}$ for {uid} — {at}",
-        "record_saved_loss": "✅ Recorded LOSS -{amount}$ for {uid} — {at}",
-        "record_invalid_amount": "❌ Send a valid number (e.g., 10 or 10-).",
-        "userstats_header": "📊 Stats for user {uid}",
-        "balance_linked_user": "✅ The bot is linked to your trading account.\n💰 Your balance is now: {bal}$",
-        "balance_updated_admin": "✅ Balance updated for {uid}. New balance: {bal}$",
-        "balance_deduct_user": "🔻 {amount}$ has been deducted.\n💰 Your new balance: {bal}$",
-        "balance_deduct_admin": "🔻 Deducted from {uid}. New balance: {bal}$",
-        "broadcast_need_text": "❌ Usage: /broadcast text",
-        "broadcast_done": "📢 Sent: OK {ok} / Fail {fail}",
-        "relayed_to_admin": "📨 Your message was sent to the admin.",
-        "genkey_ok": "🔐 Generated {n} key(s) of type {t}.\nFirst key: <code>{first}</code>",
-        "delkey_ok": "🗑️ Key deleted.",
-        "delkey_notfound": "❌ Key not found.",
-        "delsub_ok": "🗑️ Subscription deleted for user {uid}.",
-        "subinfo_line": "👤 {uid} — type: {t}, expires: {exp}",
-        "subinfo_none": "No subscription.",
     },
     "tr": {
-        "welcome": "👋 Trading botuna hoş geldin\n\n💰 Bakiyen: {balance}$\n🆔 ID: {uid}",
+        "welcome": "👋 Trading botuna hoş geldin\n\n💰 Bakiyen: {balance}$\n🆔 ID: {user_id}",
         "need_key": "🔑 Botu etkinleştirmek için abonelik anahtarını gir.\nTürler: günlük / haftalık / aylık / yıllık / ömür boyu",
         "key_ok": "✅ Aboneliğin ({stype}) etkin. Bitiş: {exp}\nMenü için /start.",
         "key_ok_life": "✅ Abonelik ({stype}, ömür boyu) etkin. Keyfini çıkar!\nMenü için /start.",
@@ -287,6 +267,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_deposit": "💳 Yatırma",
         "btn_website": "🌍 Web sitemiz",
         "btn_support": "📞 Destek ile iletişim",
+        "btn_buy": "🛒 Abonelik satın al",
         "help_title": "🛠 Kullanılabilir komutlar:",
         "help_public": [
             "/start - Ana menü",
@@ -294,8 +275,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/balance - Bakiyen",
             "/daily - Günün işlemi",
             "/withdraw &lt;tutar&gt; - Çekim isteği",
-            "/mystats - İstatistiklerim",
-            "btn_buy": "🛒 Abonelik satın al"
+            "/mystats - İstatistiklerim"
         ],
         "daily_none": "Henüz günlük işlem yok.",
         "cleardaily_ok": "🧹 Günlük işlem temizlendi.",
@@ -326,30 +306,9 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_no_data": "Henüz işlem yok.",
         "stats_line_win": "{at} — Kazanç +{amount}$",
         "stats_line_loss": "{at} — Kayıp -{amount}$",
-        "admin_only": "🚫 Sadece yönetici.",
-        "record_target_is": "🎯 Hedef kullanıcı: {uid}. 10 (kazanç) veya 10- (kayıp) gibi sayılar gönderin.",
-        "record_mode_on": "🟢 {uid} için kayıt modu AÇIK.",
-        "record_mode_off": "🛑 Kayıt modu KAPALI.",
-        "record_saved_win": "✅ {uid} için KAZANÇ +{amount}$ — {at}",
-        "record_saved_loss": "✅ {uid} için KAYIP -{amount}$ — {at}",
-        "record_invalid_amount": "❌ Geçerli sayı gönderin (örn. 10 veya 10-).",
-        "userstats_header": "📊 {uid} kullanıcısının istatistikleri",
-        "balance_linked_user": "✅ Bot, işlem hesabınıza bağlandı.\n💰 Güncel bakiyeniz: {bal}$",
-        "balance_updated_admin": "✅ {uid} için bakiye güncellendi. Yeni bakiye: {bal}$",
-        "balance_deduct_user": "🔻 Bakiyenizden {amount}$ düşüldü.\n💰 Yeni bakiyeniz: {bal}$",
-        "balance_deduct_admin": "🔻 {uid} kullanıcısından düşüldü. Yeni bakiye: {bal}$",
-        "broadcast_need_text": "❌ Kullanım: /broadcast metin",
-        "broadcast_done": "📢 Gönderildi: Başarılı {ok} / Başarısız {fail}",
-        "relayed_to_admin": "📨 Mesajınız yöneticiye gönderildi.",
-        "genkey_ok": "🔐 {t} tipinde {n} anahtar üretildi.\nİlk anahtar: <code>{first}</code>",
-        "delkey_ok": "🗑️ Anahtar silindi.",
-        "delkey_notfound": "❌ Anahtar bulunamadı.",
-        "delsub_ok": "🗑️ {uid} kullanıcısının aboneliği silindi.",
-        "subinfo_line": "👤 {uid} — tür: {t}, bitiş: {exp}",
-        "subinfo_none": "Abonelik yok.",
     },
     "es": {
-        "welcome": "👋 Bienvenido al bot de trading\n\n💰 Tu saldo: {balance}$\n🆔 Tu ID: {uid}",
+        "welcome": "👋 Bienvenido al bot de trading\n\n💰 Tu saldo: {balance}$\n🆔 Tu ID: {user_id}",
         "need_key": "🔑 Ingresa tu clave de suscripción para activar el bot.\nTipos: diario / semanal / mensual / anual / de por vida",
         "key_ok": "✅ Tu suscripción ({stype}) está activa. Expira: {exp}\nUsa /start para abrir el menú.",
         "key_ok_life": "✅ Suscripción ({stype}, de por vida) activada. ¡Disfruta!\nUsa /start para abrir el menú.",
@@ -363,6 +322,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_deposit": "💳 Depósito",
         "btn_website": "🌍 Sitio web",
         "btn_support": "📞 Contactar soporte",
+        "btn_buy": "🛒 Comprar suscripción",
         "help_title": "🛠 Comandos disponibles:",
         "help_public": [
             "/start - Menú principal",
@@ -370,8 +330,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
             "/balance - Tu saldo",
             "/daily - Operación del día",
             "/withdraw &lt;monto&gt; - Solicitar retiro",
-            "/mystats - Mis estadísticas",
-            "btn_buy": "🛒 Comprar suscripción"
+            "/mystats - Mis estadísticas"
         ],
         "daily_none": "Aún no hay operación del día.",
         "cleardaily_ok": "🧹 Operación del día eliminada.",
@@ -402,55 +361,34 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_no_data": "Aún no hay operaciones.",
         "stats_line_win": "{at} — Ganancia +{amount}$",
         "stats_line_loss": "{at} — Pérdida -{amount}$",
-        "admin_only": "🚫 Solo admin.",
-        "record_target_is": "🎯 Usuario objetivo: {uid}. Envía números como 10 (ganancia) o 10- (pérdida).",
-        "record_mode_on": "🟢 Modo de registro ACTIVADO para {uid}.",
-        "record_mode_off": "🛑 Modo de registro DESACTIVADO.",
-        "record_saved_win": "✅ Registrada GANANCIA +{amount}$ para {uid} — {at}",
-        "record_saved_loss": "✅ Registrada PÉRDIDA -{amount}$ para {uid} — {at}",
-        "record_invalid_amount": "❌ Envía un número válido (ej. 10 o 10-).",
-        "userstats_header": "📊 Estadísticas de {uid}",
-        "balance_linked_user": "✅ El bot está vinculado a tu cuenta de trading.\n💰 Tu saldo ahora es: {bal}$",
-        "balance_updated_admin": "✅ Saldo actualizado para {uid}. Nuevo saldo: {bal}$",
-        "balance_deduct_user": "🔻 Se ha descontado {amount}$. \n💰 Tu nuevo saldo: {bal}$",
-        "balance_deduct_admin": "🔻 Descontado a {uid}. Nuevo saldo: {bal}$",
-        "broadcast_need_text": "❌ Uso: /broadcast texto",
-        "broadcast_done": "📢 Enviado: OK {ok} / Fallo {fail}",
-        "relayed_to_admin": "📨 Tu mensaje fue enviado al administrador.",
-        "genkey_ok": "🔐 Generadas {n} clave(s) tipo {t}.\nPrimera: <code>{first}</code>",
-        "delkey_ok": "🗑️ Clave eliminada.",
-        "delkey_notfound": "❌ Clave no encontrada.",
-        "delsub_ok": "🗑️ Suscripción eliminada para {uid}.",
-        "subinfo_line": "👤 {uid} — tipo: {t}, expira: {exp}",
-        "subinfo_none": "Sin suscripción.",
     },
     "fr": {
-        "welcome": "👋 Bienvenue dans le bot de trading\n\n💰 Votre solde : {balance}$\n🆔 Votre ID : {uid}",
-        "need_key": "🔑 Entrez votre clé d’abonnement pour activer le bot.\nTypes : quotidien / hebdomadaire / mensuel / annuel / à vie",
-        "key_ok": "✅ Abonnement ({stype}) activé. Expire : {exp}\nUtilisez /start pour ouvrir le menu.",
-        "key_ok_life": "✅ Abonnement ({stype}, à vie) activé. Profitez !\nUtilisez /start pour ouvrir le menu.",
+        "welcome": "👋 Bienvenue dans le bot de trading\n\n💰 Votre solde : {balance}$\n🆔 Votre ID : {user_id}",
+        "need_key": "🔑 Veuillez saisir votre clé d’abonnement pour activer le bot.\nTypes : quotidien / hebdomadaire / mensuel / annuel / à vie",
+        "key_ok": "✅ Votre abonnement ({stype}) est activé. Expire : {exp}\nUtilisez /start pour ouvrir le menu.",
+        "key_ok_life": "✅ Abonnement ({stype}, à vie) activé. Profitez-en !\nUtilisez /start pour ouvrir le menu.",
         "key_invalid": "❌ Clé invalide ou déjà utilisée. Réessayez.",
-        "key_expired": "⛔ Votre abonnement a expiré. Veuillez entrer une nouvelle clé.",
+        "key_expired": "⛔ Votre abonnement a expiré. Veuillez saisir une nouvelle clé.",
         "btn_daily": "📈 Trade du jour",
         "btn_withdraw": "💸 Retrait",
         "btn_wstatus": "💼 Demandes de retrait",
         "btn_stats": "📊 Statistiques",
         "btn_lang": "🌐 Langue",
         "btn_deposit": "💳 Dépôt",
-        "btn_website": "🌍 Notre site",
+        "btn_website": "🌍 Site web",
         "btn_support": "📞 Contacter le support",
+        "btn_buy": "🛒 Acheter un abonnement",
         "help_title": "🛠 Commandes disponibles :",
         "help_public": [
             "/start - Menu principal",
             "/id - Afficher votre ID",
             "/balance - Votre solde",
             "/daily - Trade du jour",
-            "/withdraw &lt;montant&gt; - Demande de retrait",
-            "/mystats - Mes statistiques",
-            "btn_buy": "🛒 Acheter un abonnement"
+            "/withdraw &lt;montant&gt; - Demander un retrait",
+            "/mystats - Mes statistiques"
         ],
         "daily_none": "Aucun trade du jour pour le moment.",
-        "cleardaily_ok": "🧹 Trade du jour supprimé.",
+        "cleardaily_ok": "🧹 Trade du jour effacé.",
         "withdraw_enter": "❌ Format : /withdraw 50",
         "withdraw_invalid": "❌ Montant invalide.",
         "withdraw_insufficient": "Solde insuffisant. Votre solde : {bal}$",
@@ -458,71 +396,28 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "lang_menu_title": "Sélectionnez votre langue :",
         "lang_saved": "✅ Langue définie sur le français.",
         "choose_withdraw_amount": "Choisissez le montant du retrait :",
-        "requests_waiting": "Vos demandes en attente :",
         "no_requests": "Aucune demande en attente.",
+        "requests_waiting": "Vos demandes en attente :",
         "deposit_choose": "Choisissez une méthode de dépôt :",
         "deposit_cash": "💵 Espèces",
         "deposit_paypal": "🅿️ PayPal",
         "deposit_bank": "🏦 Virement bancaire",
         "deposit_mc": "💳 Mastercard",
         "deposit_visa": "💳 Visa",
-        "deposit_msg": "Pour payer via {method}, contactez-nous directement. Touchez ci-dessous :",
+        "deposit_msg": "Pour payer via {method}, contactez-nous directement. Appuyez ci-dessous :",
         "contact_us": "📩 Nous contacter",
-        "website_msg": "🔥 Touchez pour visiter notre site :",
+        "website_msg": "🔥 Appuyez pour visiter notre site :",
         "website_not_set": "ℹ️ L’URL du site n’est pas encore définie.",
-        "support_msg": "Touchez ci-dessous pour contacter le support :",
+        "support_msg": "Appuyez ci-dessous pour contacter le support :",
         "stats_title": "📊 Vos statistiques",
-        "stats_wins": "✅ Gains : {sum}$ (nb : {count})",
-        "stats_losses": "❌ Pertes : {sum}$ (nb : {count})",
+        "stats_wins": "✅ Gains : {sum}$ (nombre : {count})",
+        "stats_losses": "❌ Pertes : {sum}$ (nombre : {count})",
         "stats_net": "⚖️ Net : {net}$",
-        "stats_no_data": "Aucune opération pour l’instant.",
+        "stats_no_data": "Aucune opération pour le moment.",
         "stats_line_win": "{at} — Gain +{amount}$",
         "stats_line_loss": "{at} — Perte -{amount}$",
-        "admin_only": "🚫 Réservé à l’admin.",
-        "record_target_is": "🎯 Utilisateur ciblé : {uid}. Envoyez des nombres comme 10 (gain) ou 10- (perte).",
-        "record_mode_on": "🟢 Mode enregistrement ACTIVÉ pour {uid}.",
-        "record_mode_off": "🛑 Mode enregistrement DÉSACTIVÉ.",
-        "record_saved_win": "✅ GAIN +{amount}$ enregistré pour {uid} — {at}",
-        "record_saved_loss": "✅ PERTE -{amount}$ enregistrée pour {uid} — {at}",
-        "record_invalid_amount": "❌ Envoyez un nombre valide (ex : 10 ou 10-).",
-        "userstats_header": "📊 Statistiques de l’utilisateur {uid}",
-        "balance_linked_user": "✅ Le bot est lié à votre compte de trading.\n💰 Votre solde est maintenant : {bal}$",
-        "balance_updated_admin": "✅ Solde mis à jour pour {uid}. Nouveau solde : {bal}$",
-        "balance_deduct_user": "🔻 {amount}$ ont été déduits.\n💰 Nouveau solde : {bal}$",
-        "balance_deduct_admin": "🔻 Déduit pour {uid}. Nouveau solde : {bal}$",
-        "broadcast_need_text": "❌ Usage : /broadcast texte",
-        "broadcast_done": "📢 Envoyé : OK {ok} / Échec {fail}",
-        "relayed_to_admin": "📨 Votre message a été envoyé à l’admin.",
-        "genkey_ok": "🔐 {n} clé(s) générée(s) de type {t}.\nPremière : <code>{first}</code>",
-        "delkey_ok": "🗑️ Clé supprimée.",
-        "delkey_notfound": "❌ Clé introuvable.",
-        "delsub_ok": "🗑️ Abonnement supprimé pour {uid}.",
-        "subinfo_line": "👤 {uid} — type : {t}, expire : {exp}",
-        "subinfo_none": "Aucun abonnement.",
     }
 }
-
-# ---------- Users ----------
-def _now() -> datetime:
-    return datetime.now()
-
-def _now_str() -> str:
-    return _now().strftime("%Y-%m-%d %H:%M:%S")
-
-def ensure_user(chat_id: int) -> str:
-    uid = str(chat_id)
-    users = load_json("users.json") or {}
-    if uid not in users:
-        users[uid] = {
-            "balance": 0,
-            "role": "admin" if chat_id == ADMIN_ID else "user",
-            "created_at": _now_str(),
-            "lang": "ar",
-            "sub": None,         # {"type": "...", "expire_at": "YYYY-mm-dd HH:MM:SS" or None, "key": "XXXX"}
-            "await_key": True    # if True -> treat next plain text as key
-        }
-        save_json("users.json", users)
-    return uid
 
 def get_lang(uid: str) -> str:
     users = load_json("users.json") or {}
@@ -531,50 +426,61 @@ def get_lang(uid: str) -> str:
 
 def set_lang(uid: str, lang: str) -> None:
     users = load_json("users.json") or {}
-    users.setdefault(uid, {})
+    users.setdefault(uid, {"balance": 0, "role": "user", "created_at": _now_str(), "lang": "ar"})
     users[uid]["lang"] = lang if lang in LANGS else "ar"
     save_json("users.json", users)
 
-def T(user_id: str, key: str, **kwargs) -> str:
-    lang = get_lang(user_id)
+def T(user_uid: str, key: str, **kwargs) -> str:
+    lang = get_lang(user_uid)
     s = TEXT.get(lang, TEXT["ar"]).get(key, "")
     try:
         return s.format(**kwargs)
     except Exception:
         return s
 
-# ---------- Subscription helpers ----------
-DURATIONS = {
-    "daily": 1,
-    "weekly": 7,
-    "monthly": 30,
-    "yearly": 365,
-    "lifetime": None,
-}
-
-def _key_store() -> Dict[str, Any]:
-    return load_json("keys.json") or {}   # { key: { "type": str, "created_at": str, "used_by": uid|None, "used_at": str|None } }
-
-def _save_keys(data: Dict[str, Any]) -> None:
-    save_json("keys.json", data)
-
-def is_sub_active(uid: str) -> bool:
+# ---------- Users ----------
+def ensure_user(chat_id: int) -> str:
+    uid = str(chat_id)
     users = load_json("users.json") or {}
-    sub = (users.get(uid, {}) or {}).get("sub")
-    if not sub:
-        return False
-    exp = sub.get("expire_at")
-    if exp is None:
-        return True  # lifetime
-    try:
-        return _now() <= datetime.strptime(exp, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return False
+    if uid not in users:
+        users[uid] = {
+            "balance": 0,
+            "role": "admin" if chat_id == ADMIN_ID else "user",
+            "created_at": _now_str(),
+            "lang": "ar"
+        }
+        save_json("users.json", users)
+    return uid
+
+def is_admin(uid: str) -> bool:
+    users = load_json("users.json") or {}
+    return (users.get(uid, {}) or {}).get("role") == "admin"
+
+# ---------- Menus ----------
+def main_menu_markup(uid: str) -> types.InlineKeyboardMarkup:
+    tt = TEXT[get_lang(uid)]
+    m = types.InlineKeyboardMarkup(row_width=2)
+    m.add(types.InlineKeyboardButton(tt["btn_daily"], callback_data="daily_trade"),
+          types.InlineKeyboardButton(tt["btn_withdraw"], callback_data="withdraw_menu"))
+    m.add(types.InlineKeyboardButton(tt["btn_wstatus"], callback_data="withdraw_status"),
+          types.InlineKeyboardButton(tt["btn_stats"], callback_data="stats"))
+    m.add(types.InlineKeyboardButton(tt["btn_deposit"], callback_data="deposit"),
+          types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
+    m.add(types.InlineKeyboardButton(tt["btn_website"], callback_data="website"),
+          types.InlineKeyboardButton(tt["btn_support"], callback_data="support"))
+    return m
+
+def show_main_menu(chat_id: int):
+    uid = ensure_user(chat_id)
+    users = load_json("users.json") or {}
+    balance = (users.get(uid, {}) or {}).get("balance", 0)
+    bot.send_message(chat_id, T(uid, "welcome", balance=balance, user_id=uid), reply_markup=main_menu_markup(uid))
+
+# ---------- Subscription flow ----------
 def require_active_or_ask(chat_id: int) -> bool:
     """Return True if active; else ask for key (with Buy button) and return False."""
     uid = ensure_user(chat_id)
 
-    # إذا الاشتراك فعّال خلّص
     if is_sub_active(uid):
         users = load_json("users.json") or {}
         if users.get(uid, {}).get("await_key"):
@@ -582,7 +488,6 @@ def require_active_or_ask(chat_id: int) -> bool:
             save_json("users.json", users)
         return True
 
-    # مش فعّال -> طالب المفتاح + زر شراء اشتراك يفتح شات الدعم
     users = load_json("users.json") or {}
     users.setdefault(uid, {})
     users[uid]["await_key"] = True
@@ -592,13 +497,27 @@ def require_active_or_ask(chat_id: int) -> bool:
     msg = T(uid, "key_expired") if users.get(uid, {}).get("sub") else T(uid, "need_key")
 
     chat_link = "https://t.me/qlsupport"
-
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(tt["btn_buy"], url=chat_link))
 
     bot.send_message(chat_id, msg, reply_markup=kb)
     return False
 
+def _rand_key(n=4) -> str:
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
+
+def generate_keys(k_type: str, count: int) -> list[str]:
+    keys = _key_store()
+    out = []
+    for _ in range(count):
+        while True:
+            k = f"{k_type[:2].upper()}-{_rand_key()}-{_rand_key()}-{_rand_key()}"
+            if k not in keys:
+                break
+        keys[k] = {"type": k_type, "created_at": _now_str()}
+        out.append(k)
+    _save_keys(keys)
+    return out
 
 def activate_key_for_user(uid: str, key: str) -> Optional[str]:
     """Try to activate key. Return localized success msg; None if invalid."""
@@ -616,7 +535,7 @@ def activate_key_for_user(uid: str, key: str) -> Optional[str]:
     if days is None:  # lifetime
         exp = None
         users[uid]["sub"] = {"type": ktype, "expire_at": exp, "key": key}
-        users[uid]["await_key"] = False  # خلّصنا من انتظار المفتاح
+        users[uid]["await_key"] = False
         keys[key]["used_by"] = uid
         keys[key]["used_at"] = _now_str()
         _save_keys(keys)
@@ -626,108 +545,41 @@ def activate_key_for_user(uid: str, key: str) -> Optional[str]:
         exp_dt = _now() + timedelta(days=days)
         exp = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
         users[uid]["sub"] = {"type": ktype, "expire_at": exp, "key": key}
-        users[uid]["await_key"] = False  # خلّصنا من انتظار المفتاح
+        users[uid]["await_key"] = False
         keys[key]["used_by"] = uid
         keys[key]["used_at"] = _now_str()
         _save_keys(keys)
         save_json("users.json", users)
         return T(uid, "key_ok", stype=ktype, exp=exp)
 
-# ---------- Stats helpers (existing) ----------
-def stats_get(uid: str) -> Dict[str, Any]:
-    stats = load_json("stats.json") or {}
-    return stats.get(uid, {
-        "events": [],  # [{"type":"win"|"loss","amount":int,"at":str}]
-        "totals": {"win": {"count": 0, "sum": 0}, "loss": {"count": 0, "sum": 0}}
-    })
-
-def stats_save(uid: str, data: Dict[str, Any]) -> None:
-    stats = load_json("stats.json") or {}
-    stats[uid] = data
-    save_json("stats.json", stats)
-
-def stats_add(uid: str, typ: str, amount: int) -> None:
-    data = stats_get(uid)
-    data["events"].insert(0, {"type": typ, "amount": int(amount), "at": _now_str()})
-    t = data["totals"].setdefault(typ, {"count": 0, "sum": 0})
-    t["count"] += 1
-    t["sum"] += int(amount)
-    stats_save(uid, data)
-
-def format_user_stats(viewer_uid: str, target_uid: str, limit: int = 10) -> str:
-    d = stats_get(target_uid)
-    wins = d["totals"]["win"]
-    losses = d["totals"]["loss"]
-    net = int(wins["sum"]) - int(losses["sum"])
-    header = f"<b>{T(viewer_uid, 'stats_title' if viewer_uid==target_uid else 'userstats_header', uid=target_uid)}</b>"
-    lines = [
-        header,
-        T(viewer_uid, "stats_wins", sum=wins["sum"], count=wins["count"]),
-        T(viewer_uid, "stats_losses", sum=losses["sum"], count=losses["count"]),
-        T(viewer_uid, "stats_net", net=net)
-    ]
-    events = d["events"][:limit]
-    if not events:
-        lines.append(T(viewer_uid, "stats_no_data"))
-    else:
-        for e in events:
-            if e["type"] == "win":
-                lines.append(T(viewer_uid, "stats_line_win", at=e["at"], amount=e["amount"]))
-            else:
-                lines.append(T(viewer_uid, "stats_line_loss", at=e["at"], amount=e["amount"]))
-    return "\n".join(lines)
-
-RECORD_MODE: Dict[str, str] = {}
-
-# ---------- UI ----------
-def main_menu_markup(uid: str) -> telebot.types.InlineKeyboardMarkup:
-    tt = TEXT[get_lang(uid)]
-    m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton(tt["btn_daily"], callback_data="daily_trade"),
-          types.InlineKeyboardButton(tt["btn_withdraw"], callback_data="withdraw_menu"))
-    m.add(types.InlineKeyboardButton(tt["btn_wstatus"], callback_data="withdraw_status"),
-          types.InlineKeyboardButton(tt["btn_stats"], callback_data="stats"))
-    m.add(types.InlineKeyboardButton(tt["btn_deposit"], callback_data="deposit_menu"),
-          types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
-    m.add(types.InlineKeyboardButton(tt["btn_website"], callback_data="open_website"),
-          types.InlineKeyboardButton(tt["btn_support"], callback_data="open_support"))
-    return m
-
-def show_main_menu(chat_id: int):
-    uid = ensure_user(chat_id)
-    if not is_sub_active(uid):
-        require_active_or_ask(chat_id)
-        return
-    users = load_json("users.json") or {}
-    balance = (users.get(uid, {}) or {}).get("balance", 0)
-    bot.send_message(chat_id, T(uid, "welcome", balance=balance, uid=uid), reply_markup=main_menu_markup(uid))
-
 # ---------- Commands ----------
 @bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
-    ensure_user(message.chat.id)
+    uid = ensure_user(message.chat.id)
+    if not require_active_or_ask(message.chat.id):
+        return
     show_main_menu(message.chat.id)
 
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
     uid = ensure_user(message.chat.id)
-    # يسمح عرض /help حتى لو غير مشترك ليوضح له الخطوات
+    if not require_active_or_ask(message.chat.id):
+        return
     tt = TEXT[get_lang(uid)]
-    lines = [tt["help_title"], *tt["help_public"]]
-    if not is_sub_active(uid):
-        lines.insert(0, T(uid, "need_key"))
-    bot.reply_to(message, "\n".join(lines))
+    bot.reply_to(message, "\n".join([tt["help_title"], *tt["help_public"]]))
 
 @bot.message_handler(commands=["id"])
 def cmd_id(message: types.Message):
     uid = ensure_user(message.chat.id)
-    if not require_active_or_ask(message.chat.id): return
+    if not require_active_or_ask(message.chat.id):
+        return
     bot.reply_to(message, f"<b>ID</b> <code>{message.from_user.id}</code>")
 
 @bot.message_handler(commands=["balance"])
 def cmd_balance(message: types.Message):
     uid = ensure_user(message.chat.id)
-    if not require_active_or_ask(message.chat.id): return
+    if not require_active_or_ask(message.chat.id):
+        return
     users = load_json("users.json") or {}
     bal = (users.get(uid, {}) or {}).get("balance", 0)
     bot.reply_to(message, f"💰 {bal}$")
@@ -735,21 +587,16 @@ def cmd_balance(message: types.Message):
 @bot.message_handler(commands=["daily"])
 def cmd_daily(message: types.Message):
     uid = ensure_user(message.chat.id)
-    if not require_active_or_ask(message.chat.id): return
+    if not require_active_or_ask(message.chat.id):
+        return
     daily = load_daily_text() or TEXT[get_lang(uid)]["daily_none"]
     bot.reply_to(message, daily if isinstance(daily, str) else str(daily))
-
-@bot.message_handler(commands=["cleardaily"])
-def cmd_cleardaily(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    save_daily_text("")
-    bot.reply_to(message, T(uid, "cleardaily_ok"))
 
 @bot.message_handler(commands=["withdraw"])
 def cmd_withdraw(message: types.Message):
     uid = ensure_user(message.chat.id)
-    if not require_active_or_ask(message.chat.id): return
+    if not require_active_or_ask(message.chat.id):
+        return
     parts = (message.text or "").strip().split()
     if len(parts) < 2:
         return open_withdraw_menu(message.chat.id, uid)
@@ -758,198 +605,6 @@ def cmd_withdraw(message: types.Message):
     except Exception:
         return bot.reply_to(message, TEXT[get_lang(uid)]["withdraw_invalid"])
     return create_withdraw_request(message.chat.id, uid, amount)
-
-@bot.message_handler(commands=["mystats"])
-def cmd_mystats(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not require_active_or_ask(message.chat.id): return
-    bot.reply_to(message, format_user_stats(uid, uid))
-
-@bot.message_handler(commands=["userstats"])
-def cmd_userstats(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        return bot.reply_to(message, "Usage: /userstats <user_id>")
-    target = parts[1]
-    bot.reply_to(message, format_user_stats(uid, target))
-
-@bot.message_handler(commands=["record_set"])
-def cmd_record_set(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").strip().split()
-    if len(parts) < 2:
-        return bot.reply_to(message, "Usage: /record_set <user_id>")
-    target = parts[1]
-    RECORD_MODE[uid] = target
-    bot.reply_to(message, T(uid, "record_mode_on", uid=target) + "\n" + T(uid, "record_target_is", uid=target))
-
-@bot.message_handler(commands=["record_done"])
-def cmd_record_done(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    if uid in RECORD_MODE: del RECORD_MODE[uid]
-    bot.reply_to(message, T(uid, "record_mode_off"))
-
-@bot.message_handler(commands=["win", "loss"])
-def cmd_win_loss(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").strip().split()
-    if len(parts) < 3:
-        return bot.reply_to(message, f"Usage: /{message.text.split()[0][1:]} <user_id> <amount>")
-    target, amount_str = parts[1], parts[2]
-    try:
-        amount = int(amount_str)
-    except Exception:
-        return bot.reply_to(message, T(uid, "record_invalid_amount"))
-    typ = "win" if message.text.startswith("/win") else "loss"
-    stats_add(target, typ, amount)
-    at = _now_str()
-    bot.reply_to(message,
-        T(uid, "record_saved_win" if typ=="win" else "record_saved_loss",
-          amount=amount, uid=target, at=at))
-
-@bot.message_handler(commands=["addbalance"])
-def cmd_addbalance(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return
-    parts = (message.text or "").strip().split()
-    if len(parts) < 3:
-        return bot.reply_to(message, "Usage: /addbalance &lt;user_id&gt; &lt;amount&gt;")
-    target, amount = parts[1], int(parts[2])
-    users = load_json("users.json") or {}
-    users.setdefault(target, {"balance": 0})
-    users[target]["balance"] = users[target].get("balance", 0) + amount
-    save_json("users.json", users)
-    try:
-        bot.send_message(int(target), T(target, "balance_linked_user", bal=users[target]["balance"]))
-    except Exception as e:
-        log.warning("Cannot message target %s: %s", target, e)
-    bot.reply_to(message, T(uid, "balance_updated_admin", uid=target, bal=users[target]["balance"]))
-
-@bot.message_handler(commands=["removebalance"])
-def cmd_removebalance(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return
-    parts = (message.text or "").strip().split()
-    if len(parts) < 3:
-        return bot.reply_to(message, "Usage: /removebalance &lt;user_id&gt; &lt;amount&gt;")
-    target, amount = parts[1], int(parts[2])
-    users = load_json("users.json") or {}
-    users.setdefault(target, {"balance": 0})
-    new_bal = users[target].get("balance", 0) - amount
-    if new_bal < 0: new_bal = 0
-    users[target]["balance"] = new_bal
-    save_json("users.json", users)
-    try:
-        bot.send_message(int(target), T(target, "balance_deduct_user", amount=amount, bal=new_bal))
-    except Exception as e:
-        log.warning("Cannot message target %s: %s", target, e)
-    bot.reply_to(message, T(uid, "balance_deduct_admin", uid=target, bal=new_bal))
-
-@bot.message_handler(commands=["broadcast"])
-def cmd_broadcast(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    raw = (message.text or "")
-    if " " not in raw.strip():
-        return bot.reply_to(message, T(uid, "broadcast_need_text"))
-    text = raw.split(" ", 1)[1].strip()
-    users = load_json("users.json") or {}
-    ok = fail = 0
-    for tuid in list(users.keys()):
-        try:
-            bot.send_message(int(tuid), text)
-            ok += 1
-        except Exception:
-            fail += 1
-    bot.reply_to(message, T(uid, "broadcast_done", ok=ok, fail=fail))
-
-# ---------- Subscription Admin Commands ----------
-import secrets
-import string
-
-def _gen_code(n: int = 16) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(n))
-
-@bot.message_handler(commands=["genkey"])
-def cmd_genkey(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").strip().split()
-    if len(parts) < 3:
-        return bot.reply_to(message, "Usage: /genkey <daily|weekly|monthly|yearly|lifetime> <count>")
-    ktype, count_str = parts[1].lower(), parts[2]
-    if ktype not in DURATIONS:
-        return bot.reply_to(message, "Invalid type.")
-    try:
-        count = max(1, int(count_str))
-    except Exception:
-        return bot.reply_to(message, "Invalid count.")
-    keys = _key_store()
-    first = None
-    for i in range(count):
-        code = _gen_code(16)
-        while code in keys:
-            code = _gen_code(16)
-        keys[code] = {"type": ktype, "created_at": _now_str(), "used_by": None, "used_at": None}
-        if first is None: first = code
-    _save_keys(keys)
-    bot.reply_to(message, T(uid, "genkey_ok", n=count, t=ktype, first=first))
-
-@bot.message_handler(commands=["delkey"])
-def cmd_delkey(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").strip().split()
-    if len(parts) < 2:
-        return bot.reply_to(message, "Usage: /delkey <KEY>")
-    key = parts[1].strip()
-    keys = _key_store()
-    if key not in keys:
-        return bot.reply_to(message, T(uid, "delkey_notfound"))
-    # if key was used, also clear user sub
-    used_by = keys[key].get("used_by")
-    if used_by:
-        users = load_json("users.json") or {}
-        if users.get(used_by, {}).get("sub", {}).get("key") == key:
-            users[used_by]["sub"] = None
-            users[used_by]["await_key"] = True
-            save_json("users.json", users)
-    del keys[key]
-    _save_keys(keys)
-    bot.reply_to(message, T(uid, "delkey_ok"))
-
-@bot.message_handler(commands=["delsub"])
-def cmd_delsub(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").strip().split()
-    if len(parts) < 2:
-        return bot.reply_to(message, "Usage: /delsub <user_id>")
-    target = parts[1]
-    users = load_json("users.json") or {}
-    if users.get(target):
-        users[target]["sub"] = None
-        users[target]["await_key"] = True
-        save_json("users.json", users)
-    bot.reply_to(message, T(uid, "delsub_ok", uid=target))
-
-@bot.message_handler(commands=["subinfo"])
-def cmd_subinfo(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid): return bot.reply_to(message, T(uid, "admin_only"))
-    parts = (message.text or "").strip().split()
-    target = parts[1] if len(parts) > 1 else uid
-    users = load_json("users.json") or {}
-    sub = (users.get(target, {}) or {}).get("sub")
-    if not sub:
-        return bot.reply_to(message, T(uid, "subinfo_none"))
-    bot.reply_to(message, T(uid, "subinfo_line", uid=target, t=sub.get("type"), exp=sub.get("expire_at")))
 
 # ---------- Withdraw Helpers ----------
 def open_withdraw_menu(chat_id: int, uid: str):
@@ -980,47 +635,13 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     save_json("withdraw_requests.json", withdraw_requests)
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
 
-# ---------- Fallback command router (handles weird slashes/RTL) ----------
-ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
-def norm_text(txt: str) -> str:
-    if not txt: return ""
-    t = txt.strip()
-    for ch in ZERO_WIDTH:
-        t = t.replace(ch, "")
-    return t.replace("／","/").replace("⁄","/")
-
-def dispatch_command(message: types.Message):
-    raw = norm_text(message.text or "")
-    cmd = raw.split()[0].lower()
-    if cmd in ("/start", "start"):
-        return cmd_start(message)
-    if cmd in ("/help", "help"):
-        return cmd_help(message)
-    if cmd in ("/id", "id"):
-        return cmd_id(message)
-    if cmd in ("/balance", "balance"):
-        return cmd_balance(message)
-    if cmd.startswith("/daily") or cmd=="daily":
-        return cmd_daily(message)
-    if cmd.startswith("/withdraw") or cmd=="withdraw":
-        return cmd_withdraw(message)
-    if cmd == "/mystats":
-        return cmd_mystats(message)
-    return
-
-@bot.message_handler(func=lambda m: bool(m.text) and m.text.strip().startswith(("/", "／", "⁄")))
-def any_command_like(message: types.Message):
-    try:
-        return dispatch_command(message)
-    except Exception as e:
-        log.error("fallback dispatch error: %s", e)
-
 # ---------- Callbacks ----------
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
-    # block callbacks if sub inactive (allow lang menu to change language)
-    if call.data not in ("lang_menu",) and not is_sub_active(uid):
+
+    # gate on subscription
+    if not is_sub_active(uid):
         require_active_or_ask(call.message.chat.id)
         try:
             bot.answer_callback_query(call.id)
@@ -1096,108 +717,109 @@ def callbacks(call: types.CallbackQuery):
         return bot.send_message(call.message.chat.id, "Nothing to cancel.")
 
     if data == "stats":
-        return bot.send_message(call.message.chat.id, format_user_stats(uid, uid))
-
-    if data == "deposit_menu":
-        tt = TEXT[get_lang(uid)]
-        mm = types.InlineKeyboardMarkup(row_width=2)
-        mm.add(types.InlineKeyboardButton(tt["deposit_cash"], callback_data="dep_cash"),
-               types.InlineKeyboardButton(tt["deposit_paypal"], callback_data="dep_paypal"))
-        mm.add(types.InlineKeyboardButton(tt["deposit_bank"], callback_data="dep_bank"))
-        mm.add(types.InlineKeyboardButton(tt["deposit_mc"], callback_data="dep_mc"),
-               types.InlineKeyboardButton(tt["deposit_visa"], callback_data="dep_visa"))
+        users = load_json("users.json") or {}
+        wreq = load_json("withdraw_requests.json") or {}
+        msg = f"👥 Users: {len(users)}\n💼 Withdraw requests: {len(wreq)}"
+        mm = types.InlineKeyboardMarkup()
         mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, tt["deposit_choose"], reply_markup=mm)
+        return bot.send_message(call.message.chat.id, msg, reply_markup=mm)
 
-    if data.startswith("dep_"):
+    if data == "deposit":
         tt = TEXT[get_lang(uid)]
-        methods = {
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(tt["deposit_cash"], callback_data="dep_cash"),
+               types.InlineKeyboardButton(tt["deposit_paypal"], callback_data="dep_pp"))
+        kb.add(types.InlineKeyboardButton(tt["deposit_bank"], callback_data="dep_bank"))
+        kb.add(types.InlineKeyboardButton(tt["deposit_mc"], callback_data="dep_mc"),
+               types.InlineKeyboardButton(tt["deposit_visa"], callback_data="dep_visa"))
+        kb.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
+        return bot.send_message(call.message.chat.id, tt["deposit_choose"], reply_markup=kb)
+
+    if data in ("dep_cash", "dep_pp", "dep_bank", "dep_mc", "dep_visa"):
+        tt = TEXT[get_lang(uid)]
+        method_map = {
             "dep_cash": tt["deposit_cash"],
-            "dep_paypal": tt["deposit_paypal"],
+            "dep_pp": tt["deposit_paypal"],
             "dep_bank": tt["deposit_bank"],
             "dep_mc": tt["deposit_mc"],
             "dep_visa": tt["deposit_visa"],
         }
-        method = methods.get(data, "Payment")
-        chat_link = f"https://t.me/{SUPPORT_USER}"
-        mm = types.InlineKeyboardMarkup()
-        mm.add(types.InlineKeyboardButton(tt["contact_us"], url=chat_link))
-        return bot.send_message(call.message.chat.id, T(uid, "deposit_msg", method=method), reply_markup=mm)
+        method = method_map.get(data, "Payment")
+        chat_link = "https://t.me/qlsupport"
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(tt["contact_us"], url=chat_link))
+        kb.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
+        return bot.send_message(call.message.chat.id, tt["deposit_msg"].format(method=method), reply_markup=kb)
 
-    if data == "open_website":
+    if data == "website":
         tt = TEXT[get_lang(uid)]
         if WEBSITE_URL:
-            mm = types.InlineKeyboardMarkup()
-            mm.add(types.InlineKeyboardButton(tt["btn_website"], url=WEBSITE_URL))
-            return bot.send_message(call.message.chat.id, tt["website_msg"], reply_markup=mm)
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton(tt["btn_website"], url=WEBSITE_URL))
+            kb.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
+            return bot.send_message(call.message.chat.id, tt["website_msg"], reply_markup=kb)
         else:
-            return bot.send_message(call.message.chat.id, tt["website_not_set"])
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
+            return bot.send_message(call.message.chat.id, tt["website_not_set"], reply_markup=kb)
 
-    if data == "open_support":
+    if data == "support":
         tt = TEXT[get_lang(uid)]
-        chat_link = f"https://t.me/{SUPPORT_USER}"
-        mm = types.InlineKeyboardMarkup()
-        mm.add(types.InlineKeyboardButton(tt["contact_us"], url=chat_link))
-        return bot.send_message(call.message.chat.id, tt["support_msg"], reply_markup=mm)
+        chat_link = "https://t.me/qlsupport"
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(tt["btn_support"], url=chat_link))
+        kb.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
+        return bot.send_message(call.message.chat.id, tt["support_msg"], reply_markup=kb)
 
-# ---------- Non-command messages ----------
-@bot.message_handler(func=lambda m: bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
-def plain_text_router(message: types.Message):
+# ---------- Any "/"-like dispatch (safe) ----------
+ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
+def norm_text(txt: str) -> str:
+    if not txt: return ""
+    t = txt.strip()
+    for ch in ZERO_WIDTH:
+        t = t.replace(ch, "")
+    return t.replace("／","/").replace("⁄","/")
+
+def dispatch_command(message: types.Message):
+    raw = norm_text(message.text or "")
+    cmd = raw.split()[0].lower()
+    if cmd in ("/start", "start"):
+        return cmd_start(message)
+    if cmd in ("/help", "help"):
+        return cmd_help(message)
+    if cmd in ("/id", "id"):
+        return cmd_id(message)
+    if cmd in ("/balance", "balance"):
+        return cmd_balance(message)
+    if cmd.startswith("/daily") or cmd == "daily":
+        return cmd_daily(message)
+    if cmd.startswith("/withdraw") or cmd == "withdraw":
+        return cmd_withdraw(message)
+    return
+
+@bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
+def any_command_like(message: types.Message):
+    try:
+        return dispatch_command(message)
+    except Exception as e:
+        log.error("fallback dispatch error: %s", e)
+
+# ---------- Key input when inactive ----------
+@bot.message_handler(func=lambda m: bool(m.text and not m.text.startswith("/")))
+def key_or_chat(message: types.Message):
     uid = ensure_user(message.chat.id)
     users = load_json("users.json") or {}
-
-    # If awaiting key OR subscription inactive => treat as key attempt
-    if users.get(uid, {}).get("await_key", True) or not is_sub_active(uid):
-        key = (message.text or "").strip().upper()
-        ok_msg = activate_key_for_user(uid, key)
-        if ok_msg:
-            users = load_json("users.json") or {}
-            users[uid]["await_key"] = False
-            save_json("users.json", users)
-            return bot.reply_to(message, ok_msg)
+    awaiting = (users.get(uid, {}) or {}).get("await_key", False)
+    if awaiting or not is_sub_active(uid):
+        key = (message.text or "").strip()
+        msg = activate_key_for_user(uid, key)
+        if msg:
+            bot.reply_to(message, msg)
+            show_main_menu(message.chat.id)
         else:
-            return bot.reply_to(message, T(uid, "key_invalid"))
-
-    # Otherwise (active) → relay message to admin as usual
-    try:
-        uname = f"@{message.from_user.username}" if message.from_user.username else ""
-    except Exception:
-        uname = ""
-    info = f"📨 MSG from {message.from_user.id} {html.escape(uname)}\n" \
-           f"Name: {html.escape((message.from_user.first_name or '') + ' ' + (message.from_user.last_name or ''))}\n" \
-           f"Text:\n{html.escape(message.text or '')}"
-    try:
-        bot.send_message(ADMIN_ID, info)
-    except Exception as e:
-        log.error("Failed relaying to admin: %s", e)
-    try:
-        bot.reply_to(message, T(uid, "relayed_to_admin"))
-    except Exception:
-        pass
-
-# ---------- Record mode numeric handler (admin only, numbers) ----------
-@bot.message_handler(func=lambda m: (str(m.from_user.id) in RECORD_MODE) and bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
-def record_mode_numbers(message: types.Message):
-    admin_uid = ensure_user(message.from_user.id)
-    target = RECORD_MODE.get(admin_uid)
-    if not target:
+            bot.reply_to(message, T(uid, "key_invalid"))
         return
-    txt = (message.text or "").strip()
-    typ: Optional[str] = None
-    amt_str = None
-    if txt.endswith("-") and txt[:-1].isdigit():
-        typ = "loss"; amt_str = txt[:-1]
-    elif txt.startswith("-") and txt[1:].isdigit():
-        typ = "loss"; amt_str = txt[1:]
-    elif txt.isdigit():
-        typ = "win"; amt_str = txt
-    if typ is None or not amt_str:
-        return bot.reply_to(message, T(admin_uid, "record_invalid_amount"))
-    amount = int(amt_str)
-    stats_add(target, typ, amount)
-    at = _now_str()
-    bot.reply_to(message, T(admin_uid, "record_saved_win" if typ=="win" else "record_saved_loss",
-                            amount=amount, uid=target, at=at))
+    # إذا كان مش منتظر مفتاح واشتراكه فعّال، تجاهل هنا (أو أرسلها للإدارة لو بدك)
 
 # ---------- Webhook & Server ----------
 @app.get("/")
@@ -1217,7 +839,7 @@ def webhook():
         log.error("Webhook error: %s", e)
     return "OK", 200
 
-# Set webhook automatically if WEBHOOK_URL present
+# Set webhook if URL provided
 if WEBHOOK_URL:
     try:
         bot.remove_webhook()
@@ -1233,9 +855,11 @@ if WEBHOOK_URL:
         log.error("set_webhook failed: %s", e)
 
 if __name__ == "__main__":
+    # على Render: شغّل Flask فقط ليستقبل الويب هوك؛ لا تعمل polling إذا WEBHOOK_URL مضبوط
     if WEBHOOK_URL:
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+        app.run(host="0.0.0.0", port=PORT)
     else:
+        log.info("Running locally with polling...")
         try:
             bot.remove_webhook()
         except Exception:
