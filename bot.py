@@ -940,6 +940,32 @@ def callbacks(call: types.CallbackQuery):
         kb.add(types.InlineKeyboardButton(tt["contact_us"], url="https://t.me/qlsupport"))
         return bot.send_message(call.message.chat.id, tt["support_msg"], reply_markup=kb)
 
+
+# --- Language menu
+if data == "lang_menu":
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("العربية", callback_data="set_lang_ar"),
+           types.InlineKeyboardButton("English", callback_data="set_lang_en"))
+    kb.add(types.InlineKeyboardButton("Türkçe", callback_data="set_lang_tr"),
+           types.InlineKeyboardButton("Español", callback_data="set_lang_es"))
+    kb.add(types.InlineKeyboardButton("Français", callback_data="set_lang_fr"))
+    return bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=kb)
+
+if data.startswith("set_lang_"):
+    code = data.split("_")[-1]
+    if code in ("ar","en","tr","es","fr"):
+        set_lang(uid, code)
+        # confirm + refresh main menu
+        try:
+            bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
+        except Exception:
+            pass
+        try:
+            show_main_menu(call.message.chat.id)
+        except Exception:
+            pass
+    return
+
 # ---------- Fallback command router (handles weird slashes/RTL) ----------
 ZERO_WIDTH = "\u200f\u200e\u2066\u2067\u2068\u2069\u200b\uFEFF"
 def norm_text(txt: str) -> str:
@@ -1099,39 +1125,14 @@ def handle_photo(message: types.Message):
                 pass
         return bot.reply_to(message, f"✅ تم الإرسال للجميع: {sent} مستخدم.")
 
+
 @bot.message_handler(func=lambda m: m.from_user.id in _BROADCAST_WAIT, content_types=['text'])
 def handle_broadcast_text(message: types.Message):
-    # User is in broadcast mode but sent text — instruct to send a photo with caption
     uid = ensure_user(message.chat.id)
     if not is_admin(uid):
         return
     bot.reply_to(message, "ℹ️ أنت في وضع الإرسال. ابعت *صورة مع كابتشن* ليتم البث للجميع، أو اكتب /cancel للإلغاء.")
 
-    # User is in broadcast mode but sent text — instruct to send a photo with caption
-    uid = ensure_user(message.chat.id)
-    if not is_admin(uid):
-        return
-    bot.reply_to(message, "ℹ️ أنت في وضع الإرسال. ابعت *صورة مع كابتشن* ليتم البث للجميع، أو اكتب /cancel للإلغاء.")
-
-    # handle broadcast photo+caption
-    uid = ensure_user(message.chat.id)
-    if message.from_user.id in _BROADCAST_WAIT and is_admin(uid):
-        _BROADCAST_WAIT.discard(message.from_user.id)
-        users = _all_user_ids()
-        if not users:
-            return bot.reply_to(message, "⚠️ ما في مستخدمين لإرسال الرسالة.")
-        # send by file_id to each
-        file_id = message.photo[-1].file_id
-        caption = message.caption or ""
-        sent = 0
-        for cid in users:
-            try:
-                bot.send_photo(cid, file_id, caption=caption)
-                sent += 1
-            except Exception as e:
-                pass
-        return bot.reply_to(message, f"✅ تم الإرسال للجميع: {sent} مستخدم.")
-    # else ignore other photos
 
 # ---- /addmoney & /finemoney ----
 @bot.message_handler(commands=["addmoney","finemoney"])
