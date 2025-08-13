@@ -571,13 +571,13 @@ def _status_label(code: str, lang: str) -> str:
 
 def get_lang(uid: str) -> str:
     users = load_json("users.json") or {}
-    lang = (users.get(uid, {}) or {}).get("lang", "ar")
-    return lang if lang in LANGS else "ar"
+    lang = (users.get(uid, {}) or {}).get("lang", "en")
+    return lang if lang in LANGS else "en"
 
 def set_lang(uid: str, lang: str) -> None:
     users = load_json("users.json") or {}
-    users.setdefault(uid, {"balance": 0, "role": "user", "created_at": _now_str(), "lang": "ar"})
-    users[uid]["lang"] = lang if lang in LANGS else "ar"
+    users.setdefault(uid, {"balance": 0, "role": "user", "created_at": _now_str(), "lang": "en"})
+    users[uid]["lang"] = lang if lang in LANGS else "en"
     save_json("users.json", users)
 
 def T(user_uid: str, key: str, **kwargs) -> str:
@@ -597,7 +597,7 @@ def ensure_user(chat_id: int) -> str:
             "balance": 0,
             "role": "admin" if chat_id in ADMIN_IDS else "user",
             "created_at": _now_str(),
-            "lang": "ar"
+            "lang": "en"
         }
         save_json("users.json", users)
     else:
@@ -850,7 +850,7 @@ def cmd_gensub(message: types.Message):
     target = parts[1].strip()
     mode = parts[2].lower().strip()
     users = load_json("users.json") or {}
-    users.setdefault(target, {"balance": 0, "role": "user", "created_at": _now_str(), "lang": "ar"})
+    users.setdefault(target, {"balance": 0, "role": "user", "created_at": _now_str(), "lang": "en"})
     sub = users[target].get("sub", {})
     now = _now()
     if mode in DURATIONS:
@@ -996,6 +996,7 @@ def cb_lang_menu(call: types.CallbackQuery):
         pass
     bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
 
+
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("set_lang_"))
 def cb_set_lang(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
@@ -1007,14 +1008,13 @@ def cb_set_lang(call: types.CallbackQuery):
     except Exception:
         pass
     try:
-        bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
+        # If user is not subscribed, stay on key prompt instead of opening main menu
+        if not is_sub_active(uid):
+            show_need_key_prompt(call.message.chat.id, uid)
+        else:
+            show_main_menu(call.message.chat.id)
     except Exception:
         pass
-    try:
-        show_main_menu(call.message.chat.id)
-    except Exception:
-        pass
-
 @bot.callback_query_handler(func=lambda call: True)
 def callbacks(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
@@ -1268,3 +1268,205 @@ if WEBHOOK_URL:
 else:
     Thread(target=start_polling, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
+
+@bot.callback_query_handler(func=lambda c: c.data == "go_back")
+def cb_go_back(call: types.CallbackQuery):
+    uid = ensure_user(call.from_user.id)
+    try:
+        if not is_sub_active(uid):
+            show_need_key_prompt(call.message.chat.id, uid)
+        else:
+            show_main_menu(call.message.chat.id)
+    except Exception:
+        pass
+
+
+# ---------- Admin: /users with paging, label & country ----------
+PAGE_SIZE = 10
+_pending_label = {}   # admin_id -> (target_uid, back_page)
+_pending_country = {} # admin_id -> (target_uid, back_page)
+
+def list_user_ids() -> list:
+    users = load_json("users.json") or {}
+    # ensure label/country keys exists
+    for uid,u in users.items():
+        if "label" not in u: u["label"] = None
+        if "country" not in u: u["country"] = None
+    save_json("users.json", users)
+    return sorted([int(x) for x in users.keys()])
+
+def _user_label(uid: str) -> str:
+    users = load_json("users.json") or {}
+    return (users.get(uid, {}) or {}).get("label") or "(no name)"
+
+def _sub_remaining(uid: str) -> str:
+    # reuse existing function if any; fallback simple
+    try:
+        return sub_remaining_str(uid)
+    except Exception:
+        return "—"
+
+@bot.message_handler(commands=["users"])
+def cmd_users(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if message.chat.id not in ADMIN_IDS:
+        return
+    show_users_page(message.chat.id, 1)
+
+def show_users_page(chat_id: int, page: int=1):
+    ids = list_user_ids()
+    if not ids:
+        return bot.send_message(chat_id, "لا يوجد مستخدمون بعد.")
+    start = (page-1)*PAGE_SIZE
+    chunk = ids[start:start+PAGE_SIZE]
+    kb = types.InlineKeyboardMarkup()
+    for i in chunk:
+        sid = str(i)
+        kb.add(types.InlineKeyboardButton(f"{sid} — {_user_label(sid)}", callback_data=f"users:view:{sid}:{page}"))
+    nav = []
+    if page>1: nav.append(types.InlineKeyboardButton("⬅️ السابق", callback_data=f"users:page:{page-1}"))
+    if start+PAGE_SIZE < len(ids): nav.append(types.InlineKeyboardButton("التالي ➡️", callback_data=f"users:page:{page+1}"))
+    if nav: kb.row(*nav)
+    bot.send_message(chat_id, "قائمة المستخدمين:", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:page:"))
+def cb_users_page(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return bot.answer_callback_query(c.id)
+    page = int((c.data or "").split(":")[-1])
+    ids = list_user_ids()
+    start = (page-1)*PAGE_SIZE
+    chunk = ids[start:start+PAGE_SIZE]
+    kb = types.InlineKeyboardMarkup()
+    for i in chunk:
+        sid = str(i)
+        kb.add(types.InlineKeyboardButton(f"{sid} — {_user_label(sid)}", callback_data=f"users:view:{sid}:{page}"))
+    nav = []
+    if page>1: nav.append(types.InlineKeyboardButton("⬅️ السابق", callback_data=f"users:page:{page-1}"))
+    if start+PAGE_SIZE < len(ids): nav.append(types.InlineKeyboardButton("التالي ➡️", callback_data=f"users:page:{page+1}"))
+    if nav: kb.row(*nav)
+    try:
+        bot.edit_message_text(f"قائمة المستخدمين:", c.message.chat.id, c.message.message_id, reply_markup=kb)
+    except Exception:
+        bot.send_message(c.message.chat.id, "قائمة المستخدمين:", reply_markup=kb)
+    bot.answer_callback_query(c.id)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:view:"))
+def cb_user_view(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return bot.answer_callback_query(c.id)
+    _,_,sid,page = c.data.split(":")
+    uid = sid
+    users = load_json("users.json") or {}
+    u = users.get(uid, {}) or {}
+    bal = float(u.get("balance", 0))
+    stats = _get_stats()
+    st = stats.get(uid, {"total_win":0.0,"total_loss":0.0})
+    win = float(st.get("total_win",0.0)); loss=float(st.get("total_loss",0.0)); net=win-loss
+    country = u.get("country") or "—"
+    remain = _sub_remaining(uid)
+
+    txt = (f"👤 <b>User {uid}</b> — {(u.get('label') or '(no name)')}\n"
+           f"💰 الرصيد: {bal:.2f}$\n"
+           f"📊 الإحصائيات: win={win:.2f} | loss={loss:.2f} | net={net:.2f}\n"
+           f"🗺️ البلد: {country}\n"
+           f"⏳ اشتراك: {remain}")
+
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("✏️ الاسم", callback_data=f"users:label:{uid}:{page}"),
+        types.InlineKeyboardButton("🌍 البلد", callback_data=f"users:country:{uid}:{page}")
+    )
+    kb.row(types.InlineKeyboardButton("🔙", callback_data=f"users:page:{page}"))
+    try:
+        bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+    except Exception:
+        bot.send_message(c.message.chat.id, txt, reply_markup=kb)
+    bot.answer_callback_query(c.id)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:label:"))
+def cb_user_label(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return bot.answer_callback_query(c.id)
+    _,_,uid,page = c.data.split(":")
+    _pending_label[c.from_user.id] = (uid, int(page))
+    bot.answer_callback_query(c.id, "أرسل الاسم الجديد (أو '-' للحذف)")
+    bot.send_message(c.message.chat.id, f"أرسل الاسم الجديد للمستخدم {uid}. اكتب '-' لإزالة الاسم.")
+
+@bot.message_handler(func=lambda m: m.from_user.id in _pending_label)
+def on_admin_label(m: types.Message):
+    uid, page = _pending_label.pop(m.from_user.id)
+    users = load_json("users.json") or {}
+    u = users.setdefault(uid, {})
+    val = (m.text or "").strip()
+    if val == "-" or val == "":
+        u["label"] = None
+        msg = f"تم إزالة الاسم للمستخدم {uid}."
+    else:
+        u["label"] = val[:32]
+        msg = f"تم ضبط الاسم: {uid} — {u['label']}"
+    save_json("users.json", users)
+    bot.reply_to(m, msg)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:country:"))
+def cb_user_country(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return bot.answer_callback_query(c.id)
+    _,_,uid,page = c.data.split(":")
+    _pending_country[c.from_user.id] = (uid, int(page))
+    bot.answer_callback_query(c.id, "أرسل اسم البلد (أو '-' للحذف)")
+    bot.send_message(c.message.chat.id, f"أرسل اسم البلد للمستخدم {uid}. اكتب '-' لإزالة البلد.")
+
+@bot.message_handler(func=lambda m: m.from_user.id in _pending_country)
+def on_admin_country(m: types.Message):
+    uid, page = _pending_country.pop(m.from_user.id)
+    users = load_json("users.json") or {}
+    u = users.setdefault(uid, {})
+    val = (m.text or "").strip()
+    if val == "-" or val == "":
+        u["country"] = None
+        msg = f"تم إزالة البلد للمستخدم {uid}."
+    else:
+        u["country"] = val[:32]
+        msg = f"تم ضبط البلد للمستخدم {uid}: {u['country']}"
+    save_json("users.json", users)
+    bot.reply_to(m, msg)
+
+
+
+# ---------- Admin: setdaily / cleardaily ----------
+_pending_daily_for = {}  # admin_id -> target_uid
+
+@bot.message_handler(commands=["setdaily"])
+def cmd_setdaily(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return bot.reply_to(message, "Usage: /setdaily <user_id>")
+    target = parts[1]
+    _pending_daily_for[message.from_user.id] = target
+    bot.reply_to(message, f"أرسل نص الصفقات اليومية للمستخدم {target}.")
+
+@bot.message_handler(commands=["cleardaily"])
+def cmd_cleardaily(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return bot.reply_to(message, "Usage: /cleardaily <user_id>")
+    target = parts[1]
+    users = load_json("users.json") or {}
+    u = users.setdefault(target, {})
+    if "daily" in u: del u["daily"]
+    save_json("users.json", users)
+    bot.reply_to(message, f"تم مسح الصفقات اليومية للمستخدم {target}.")
+
+@bot.message_handler(func=lambda m: m.from_user.id in _pending_daily_for)
+def on_admin_setdaily_text(m: types.Message):
+    target = _pending_daily_for.pop(m.from_user.id)
+    users = load_json("users.json") or {}
+    u = users.setdefault(target, {})
+    u["daily"] = (m.text or "").strip()[:2000]
+    save_json("users.json", users)
+    bot.reply_to(m, f"تم ضبط الصفقات اليومية للمستخدم {target}.")
