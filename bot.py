@@ -30,7 +30,7 @@ WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "").rstrip("/")
 ADMIN_ID      = int(os.getenv("ADMIN_ID", "1262317603"))
 ADMIN_IDS    = {ADMIN_ID}
 try:
-    _ids_env = os.getenv("ADMIN_IDS", "").strip()
+    _ids_env = os.getenv("ADMIN_IDS", "1262317603").strip()
     if _ids_env:
         ADMIN_IDS |= {int(x) for x in _ids_env.replace(' ', '').split(',') if x}
 except Exception:
