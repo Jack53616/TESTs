@@ -30,7 +30,7 @@ WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "").rstrip("/")
 ADMIN_ID      = int(os.getenv("ADMIN_ID", "1262317603"))
 ADMIN_IDS    = {ADMIN_ID}
 try:
-    _ids_env = os.getenv("ADMIN_IDS", "1262317603").strip()
+    _ids_env = os.getenv("ADMIN_IDS", "").strip()
     if _ids_env:
         ADMIN_IDS |= {int(x) for x in _ids_env.replace(' ', '').split(',') if x}
 except Exception:
@@ -730,15 +730,47 @@ def cmd_lang(message: types.Message):
     uid = ensure_user(message.chat.id)
     return bot.reply_to(message, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
 
+
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
     uid = ensure_user(message.chat.id)
-    if not require_active_or_ask(message.chat.id):
-        return
-    tt = TEXT[get_lang(uid)]
-    bot.reply_to(message, "\\n".join([tt["help_title"], *tt["help_public"]]))
+    is_admin = message.chat.id in ADMIN_IDS
 
-@bot.message_handler(commands=["id"])
+    public_cmds = [
+        "/start - Start / restart",
+        "/help - Show this help",
+        "/id - Show your ID",
+        "/balance - Show your balance",
+        "/daily - Your daily trades text",
+        "/withdraw - Withdraw menu",
+        "/wlist - My withdrawal requests status",
+        "/lang - Language menu",
+    ]
+    admin_cmds = [
+        "/genkey <type> [count] - Generate keys (daily/weekly/monthly/yearly/lifetime)",
+        "/delkey <KEY> - Delete a key",
+        "/delsub <user_id> - Delete user's subscription",
+        "/subinfo <user_id> - Show user's subscription info",
+        "/users - Users list with paging",
+        "/setdaily <user_id> - Set daily trades text for user",
+        "/cleardaily <user_id> - Clear daily trades text for user",
+        "/setwebsite <url> - Set website (if supported)",
+        "/gensub <type> <user_id> - Grant a subscription (if supported)",
+    ]
+
+    txt = ["<b>Help</b>"]
+    txt.append("Public commands:")
+    for c in public_cmds:
+        txt.append(f"• {c}")
+    if is_admin:
+        txt.append("")
+        txt.append("<b>Admin commands</b>:")
+        for c in admin_cmds:
+            txt.append(f"• {c}")
+
+    bot.send_message(message.chat.id, "\n".join(txt))
+
+
 def cmd_id(message: types.Message):
     uid = ensure_user(message.chat.id)
     if not require_active_or_ask(message.chat.id):
@@ -1221,6 +1253,8 @@ def norm_text(txt: str) -> str:
 def dispatch_command(message: types.Message):
     raw = norm_text(message.text or "")
     cmd = raw.split()[0].lower()
+    if cmd in ("/lang","lang","/language","language"):
+        return cmd_lang(message) if 'cmd_lang' in globals() else cmd_language(message)
     log.info("DISPATCH raw=%r parsed_cmd=%s", raw, cmd)
     if cmd in ("/start", "start"):
         return cmd_start(message)
