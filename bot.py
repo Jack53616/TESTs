@@ -1024,6 +1024,51 @@ def callbacks(call: types.CallbackQuery):
     except Exception:
         pass
 
+    # --- BACK FIX: handle go_back first ---
+    if data == "go_back":
+        if not is_sub_active(uid):
+            return show_need_key_prompt(call.message.chat.id, uid)
+        return show_main_menu(call.message.chat.id)
+
+    # --- USERS route-through ---
+    if data.startswith("users:"):
+        if data.startswith("users:page:"):
+            return cb_users_page(call)
+        if data.startswith("users:view:"):
+            return cb_user_view(call)
+        if data.startswith("users:label:"):
+            return cb_user_label(call)
+        if data.startswith("users:country:"):
+            return cb_user_country(call)
+
+        data = call.data or ""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    # --- BACK FIX ---
+    if data == "go_back":
+        if not is_sub_active(uid):
+            return show_need_key_prompt(call.message.chat.id, uid)
+        return show_main_menu(call.message.chat.id)
+    # --- USERS route-through ---
+    if data.startswith("users:"):
+        if data.startswith("users:page:"):
+            return cb_users_page(call)
+        if data.startswith("users:view:"):
+            return cb_user_view(call)
+        if data.startswith("users:label:"):
+            return cb_user_label(call)
+        if data.startswith("users:country:"):
+            return cb_user_country(call)
+
+    uid = ensure_user(call.from_user.id)
+    data = call.data or ""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
     if data.startswith("set_lang_"):
         code = data.split("_")[-1]
         if code in ("ar","en","tr","es","fr"):
@@ -1189,6 +1234,18 @@ def dispatch_command(message: types.Message):
         return cmd_daily(message)
     if cmd.startswith("/withdraw") or cmd == "withdraw":
         return cmd_withdraw(message)
+    if cmd.startswith("/users") or cmd == "users":
+        return cmd_users(message)
+    if cmd.startswith("/setdaily"):
+        return cmd_setdaily(message)
+    if cmd.startswith("/cleardaily"):
+        return cmd_cleardaily(message)
+    if cmd.startswith('/users') or cmd == 'users':
+        return cmd_users(message)
+    if cmd.startswith('/setdaily'):
+        return cmd_setdaily(message)
+    if cmd.startswith('/cleardaily'):
+        return cmd_cleardaily(message)
     return
 
 @bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
@@ -1244,29 +1301,25 @@ def _add_stat(user_id: str, kind: str, amount: float):
     u["history"].insert(0, {"ts": datetime.utcnow().isoformat(timespec="seconds")+"Z","kind":kind,"amount":float(amount)})
     u["history"] = u["history"][:100]
     _save_stats(stats); return u
+
 def _stats_text(uid_viewer: str, target_uid: str):
     stats = _get_stats()
-    u = stats.get(target_uid, {"total_win":0.0,"total_loss":0.0,"history":[]})
-    total_win = float(u.get("total_win",0.0)); total_loss=float(u.get("total_loss",0.0))
-    cnt_win = sum(1 for h in u.get("history",[]) if h.get("kind")=="win")
-    cnt_loss= sum(1 for h in u.get("history",[]) if h.get("kind")=="loss")
-    net = total_win - total_loss
-    header = T(uid_viewer, "stats_title") if uid_viewer==target_uid else f"📊 إحصائيات المستخدم {target_uid}"
-    lines = [header, T(uid_viewer,"stats_wins",sum=f"{total_win:.2f}",count=cnt_win),
-             T(uid_viewer,"stats_losses",sum=f"{total_loss:.2f}",count=cnt_loss),
-             T(uid_viewer,"stats_net",net=f"{net:.2f}")]
-    if not u.get("history"): lines.append(T(uid_viewer,"stats_no_data"))
-    else:
-        for h in u["history"][:10]:
-            at = str(h.get("ts","")).replace("T"," ")
-            amount_str = f"{float(h.get('amount',0)):.2f}"
-            if h.get("kind")=="win": lines.append(T(uid_viewer,"stats_line_win",at=at,amount=amount_str))
-            else: lines.append(T(uid_viewer,"stats_line_loss",at=at,amount=amount_str))
-    return "\\n".join(lines)
-
-# ---------- Webhook & Server ----------
-@app.get("/")
+    u = stats.get(target_uid, {"total_win": 0.0, "total_loss": 0.0, "history": []})
+    win_sum = float(u.get("total_win", 0.0))
+    loss_sum = float(u.get("total_loss", 0.0))
+    hist = u.get("history", []) or []
+    win_cnt = sum(1 for h in hist if (h or {}).get("kind") == "win")
+    loss_cnt = sum(1 for h in hist if (h or {}).get("kind") == "loss")
+    net = win_sum - loss_sum
+    arrow = "🟢" if net >= 0 else "🔴"
+    return (
+        "📊 <b>Statistics</b>\n"
+        f"✅ Wins: <b>{win_sum:.2f}$</b>  (count: {win_cnt})\n"
+        f"❌ Losses: <b>{loss_sum:.2f}$</b>  (count: {loss_cnt})\n"
+        f"⚖️ Net: {arrow} <b>{net:.2f}$</b>"
+    )
 def health():
+
     return "OK", 200
 
 @app.route(f"/{API_TOKEN}", methods=["GET", "POST"])
