@@ -1198,6 +1198,41 @@ def any_command_like(message: types.Message):
     except Exception as e:
         log.error("fallback dispatch error: %s", e)
 
+
+# ---------- Key input when awaiting ----------
+KEY_RE = re.compile(r"^[A-Z]{2}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$")
+
+@bot.message_handler(func=lambda m: bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
+def maybe_activate_key(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    users = load_json("users.json") or {}
+    if (users.get(uid, {}) or {}).get("await_key"):
+        key = (message.text or "").strip().upper().replace(" ", "")
+        if KEY_RE.match(key):
+            resp = activate_key_for_user(uid, key)
+            if resp:
+                try:
+                    bot.reply_to(message, resp)
+                except Exception:
+                    pass
+                try:
+                    show_main_menu(message.chat.id)
+                except Exception:
+                    pass
+                return
+        # invalid
+        try:
+            bot.reply_to(message, TEXT[get_lang(uid)]["key_invalid"])
+        except Exception:
+            pass
+        try:
+            show_need_key_prompt(message.chat.id, uid)
+        except Exception:
+            pass
+        return
+    # if not awaiting key, ignore and let other handlers work
+    return
+
 # ---------- Minimal stats placeholders to match calls ----------
 def _get_stats(): return load_json("stats.json") or {}
 def _save_stats(d): save_json("stats.json", d)
