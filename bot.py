@@ -106,6 +106,21 @@ def save_json(name: str, data: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# ---- Safe append to withdraw_log (supports dict or list storage)
+def _append_withdraw_log(entry: dict):
+    logbook = load_json("withdraw_log")
+    if logbook is None:
+        logbook = {}
+    if isinstance(logbook, list):
+        logbook.append(entry)
+        save_json("withdraw_log", logbook)
+    elif isinstance(logbook, dict):
+        key = str(len(logbook) + 1)
+        logbook[key] = entry
+        save_json("withdraw_log", logbook)
+    else:
+        save_json("withdraw_log", [entry])
+
 def get_setting(key: str, default=""):
     s = load_json("settings") or {}
     return s.get(key, default)
@@ -1256,6 +1271,19 @@ def cb_wstatus(c: types.CallbackQuery):
     msg = tt["requests_waiting"] if found else tt["no_requests"]
     bot.send_message(c.message.chat.id, msg, reply_markup=mm)
 
+@bot.message_handler(commands=["wlist"])
+def cmd_wlist(m: types.Message):
+    uid = ensure_user(m.chat.id); tt = TEXT[get_lang(uid)]
+    if not require_active_or_ask(m.chat.id): return
+    reqs = load_json("withdraw_requests") or {}
+    mm = types.InlineKeyboardMarkup(); found=False
+    for rid, r in reqs.items():
+        if r.get("user_id")==uid and r.get("status")=="pending":
+            mm.add(types.InlineKeyboardButton(f"❌ cancel {r.get('amount',0)}$", callback_data=f"cancel_{rid}")); found=True
+    mm.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
+    msg = tt["requests_waiting"] if found else tt["no_requests"]
+    bot.send_message(m.chat.id, msg, reply_markup=mm)
+
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("withdraw_"))
 def cb_withdraw_amount(c: types.CallbackQuery):
     uid = ensure_user(c.from_user.id); amount = int((c.data or "withdraw_0").split("_",1)[1])
@@ -1269,15 +1297,13 @@ def cb_wadmin(c: types.CallbackQuery):
     reqs = load_json("withdraw_requests") or {}; req = reqs.get(rid)
     if not req or req.get("status")!="pending": return bot.send_message(c.message.chat.id, "Already processed or not found.")
     if c.data.startswith("wapp_"):
-        req["status"]="approved"; logbook = load_json("withdraw_log") or {}; logbook[str(len(logbook)+1)] = {**req, "processed_at": _now_str(), "action":"approved"}
-        save_json("withdraw_log", logbook); save_json("withdraw_requests", reqs)
+        req["status"]="approved"; _append_withdraw_log({**req, "processed_at": _now_str(), "action":"approved"}); save_json("withdraw_requests", reqs)
         try: bot.send_message(int(req.get("user_id")), f"✅ تم قبول طلب السحب #{rid} بقيمة {req.get('amount')}$")
         except Exception: pass
         bot.send_message(c.message.chat.id, T(uid,"admin_w_approve", id=rid))
     else:
         users = load_json("users") or {}; u = users.setdefault(req.get("user_id"), {"balance":0}); u["balance"] = float(u.get("balance",0)) + float(req.get("amount",0))
-        save_json("users", users); req["status"]="denied"; logbook = load_json("withdraw_log") or {}; logbook[str(len(logbook)+1)] = {**req, "processed_at": _now_str(), "action":"denied"}
-        save_json("withdraw_log", logbook); save_json("withdraw_requests", reqs)
+        save_json("users", users); req["status"]="denied"; _append_withdraw_log({**req, "processed_at": _now_str(), "action":"denied"}); save_json("withdraw_requests", reqs)
         try: bot.send_message(int(req.get("user_id")), f"❌ تم رفض طلب السحب #{rid} وتمت إعادة المبلغ.")
         except Exception: pass
         bot.send_message(c.message.chat.id, T(uid,"admin_w_denied", id=rid))
