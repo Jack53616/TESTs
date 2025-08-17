@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Telegram bot (Render-ready) — Subscription Keys + Buy button + i18n
-- Shows balance then remaining subscription time on a separate line.
-- Subscription keys (daily/weekly/monthly/yearly/lifetime)
-- Admin: /genkey, /delkey, /delsub, /subinfo
-- On /start asks for key if user not subscribed (or expired)
-- "🛒 Buy" button opens support chat (@qlsupport) when subscription inactive + Language button
-- i18n (ar/en/tr/es/fr)
-- Main menu: Daily / Withdraw / Withdrawal requests / Stats / Deposit / Language / Website / Support
-- Withdraw via buttons or /withdraw <amount>
-- Storage: DB (db_kv.py) if DATABASE_URL, else JSON files
-- Webhook via Flask (Render)
+Telegram bot (Render-ready) — Monthly subscription only + i18n + players + admin balance + search
+- i18n: ar/en/tr/es/fr (covered for all used keys)
+- Subscription: **monthly only**
+- Admin: /genkey (monthly only), /gensub (monthly only or +days), /addbal, /takebal, /setbal, /players (with search), /pfind <id>, /delwebsite
+- Help is localized and correct per role
+- Users browser: /players with paging, per-user view, edit label/country, search by ID
+- Stats localized (not hardcoded English)
+- Withdraw approve/deny gated by admin
+- JSON writes are atomic; DB fallback kept if provided
+- Webhook via Flask with /healthz
 """
-import os, json, logging, random, string, re
+import os, json, logging, random, string, re, html as _html, tempfile
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from flask import Flask, request
 
 import telebot
@@ -63,11 +62,19 @@ DATA_FILES = {
     "withdraw_requests": "withdraw_requests.json",
     "withdraw_log": "withdraw_log.json",
     "trades": "trades.json",
+    "stats": "stats.json",
     "keys": "keys.json",
 }
 
-
 SETTINGS_FILE = "settings.json"
+
+def _atomic_write_json(path: str, data: Any) -> None:
+    """Write JSON atomically to avoid corruption."""
+    d = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(d)
+    os.replace(tmp, path)
 
 def load_settings() -> dict:
     try:
@@ -77,13 +84,11 @@ def load_settings() -> dict:
         return {}
 
 def save_settings(data: dict) -> None:
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(SETTINGS_FILE, data)
 
 def get_website_url() -> str:
     s = load_settings()
     return s.get("WEBSITE_URL") or WEBSITE_URL
-
 
 def load_json(name: str) -> Any:
     key = name
@@ -114,8 +119,7 @@ def save_json(name: str, data: Any) -> None:
     path = DATA_FILES.get(name.replace(".json",""), name)
     if not path.endswith(".json"):
         path = name
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(path, data)
 
 def _now() -> datetime:
     return datetime.now()
@@ -123,26 +127,28 @@ def _now() -> datetime:
 def _now_str() -> str:
     return _now().strftime("%Y-%m-%d %H:%M:%S")
 
-def load_daily_text() -> str:
+def load_daily_text_for(uid: str) -> str:
+    """Return per-user daily if exists, else global daily file/json."""
+    users = load_json("users.json") or {}
+    u = users.get(uid, {})
+    if isinstance(u, dict) and u.get("daily"):
+        return str(u.get("daily", "")).strip()
+    # global file
     if os.path.exists("daily_trade.txt"):
         try:
             return open("daily_trade.txt", "r", encoding="utf-8").read().strip()
         except Exception:
             pass
     trades = load_json("trades.json") or {}
-    return trades.get("daily", "")
+    return (trades or {}).get("daily", "")
 
 def save_daily_text(text: str) -> None:
     with open("daily_trade.txt", "w", encoding="utf-8") as f:
         f.write((text or "").strip())
 
-# ---------- Subscription Keys ----------
+# ---------- Subscription Keys (Monthly only) ----------
 DURATIONS = {
-    "daily": 1,
-    "weekly": 7,
-    "monthly": 30,
-    "yearly": 365,
-    "lifetime": None,
+    "monthly": 30
 }
 
 def _key_store() -> Dict[str, Any]:
@@ -156,7 +162,7 @@ def is_sub_active(uid: str) -> bool:
     sub = (users.get(uid, {}) or {}).get("sub")
     if not sub: return False
     exp = sub.get("expire_at")
-    if exp is None:  # lifetime
+    if exp is None:  # shouldn't happen with monthly-only, but allow
         return True
     try:
         return datetime.strptime(exp, "%Y-%m-%d %H:%M:%S") > _now()
@@ -164,7 +170,7 @@ def is_sub_active(uid: str) -> bool:
         return False
 
 def sub_remaining_str(uid: str) -> str:
-    """Return remaining time string: 3d 4h 12m 05s / ∞ / 0s."""
+    """Return remaining time string: 3d 4h 12m 05s / 0s."""
     users = load_json("users.json") or {}
     sub = (users.get(uid, {}) or {}).get("sub")
     if not sub:
@@ -190,7 +196,6 @@ def sub_remaining_str(uid: str) -> str:
     parts.append(f"{s:02d}s")
     return " ".join(parts)
 
-
 def build_lang_kb() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🇸🇦 العربية", callback_data="set_lang_ar"),
@@ -199,16 +204,17 @@ def build_lang_kb() -> types.InlineKeyboardMarkup:
            types.InlineKeyboardButton("🇪🇸 Español", callback_data="set_lang_es"))
     kb.add(types.InlineKeyboardButton("🇫🇷 Français", callback_data="set_lang_fr"))
     return kb
+
 # ---------- i18n ----------
 LANGS = ["ar", "en", "tr", "es", "fr"]
 TEXT: Dict[str, Dict[str, Any]] = {
     "ar": {
         "welcome": "👋 أهلاً بك في بوت التداول\n\n💰 رصيدك: {balance}$\n⏳ ينتهي الاشتراك بعد: {remain}\n🆔 آيديك: {user_id}",
-        "need_key": "🔑 الرجاء إدخال مفتاح الاشتراك لتفعيل البوت.\nأنواع المفاتيح: يومي / أسبوعي / شهري / سنوي / دائم",
-        "key_ok": "✅ تم تفعيل اشتراكك ({stype}). ينتهي في: {exp}\nاستخدم /start لفتح القائمة.",
-        "key_ok_life": "✅ تم تفعيل اشتراكك ({stype} — دائم). استمتع!\nاستخدم /start لفتح القائمة.",
+        "need_key": "🔑 الرجاء إدخال مفتاح الاشتراك لتفعيل البوت.\nالنوع المتاح: شهري فقط",
+        "key_ok": "✅ تم تفعيل اشتراكك (شهري). ينتهي في: {exp}\nاستخدم /start لفتح القائمة.",
+        "key_ok_life": "✅ تم التفعيل.\nاستخدم /start لفتح القائمة.",
         "key_invalid": "❌ مفتاح غير صالح أو مستخدم مسبقاً. حاول مرة أخرى.",
-        "key_expired": "⛔ انتهى اشتراكك. الرجاء إدخال مفتاح جديد للتجديد.",
+        "key_expired": "⛔ انتهى اشتراكك. الرجاء إدخال مفتاح جديد (شهري).",
         "btn_daily": "📈 صفقة اليوم",
         "btn_withdraw": "💸 سحب",
         "btn_wstatus": "💼 معاملات السحب",
@@ -221,12 +227,25 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "help_title": "🛠 الأوامر المتاحة:",
         "help_public": [
             "/start - القائمة الرئيسية",
-            "/id - عرض آيديك",
+            "/help - عرض المساعدة",
+            "/id - آيديك",
             "/balance - رصيدك",
             "/daily - صفقة اليوم",
-            "/withdraw &lt;amount&gt; - طلب سحب (مثال: /withdraw 50)",
+            "/withdraw - السحب",
             "/mystats - إحصائياتي",
-            "/genkey &lt;type&gt; [count] - توليد مفاتيح (أدمن)"
+            "/players - قائمة اللاعبين",
+            "/pfind <user_id> - فتح لاعب مباشرة"
+        ],
+        "help_admin": [
+            "/genkey monthly [count] - توليد مفاتيح (شهري فقط)",
+            "/gensub <user_id> monthly | +days <n> - منح/تمديد اشتراك",
+            "/setwebsite <URL> - ضبط رابط الموقع",
+            "/delwebsite - حذف رابط الموقع",
+            "/addbal <user_id> <amount> - زيادة رصيد",
+            "/takebal <user_id> <amount> - تنزيل رصيد",
+            "/setbal <user_id> <amount> - ضبط الرصيد",
+            "/setdaily <user_id> - ضبط صفقة اليوم للمستخدم",
+            "/cleardaily <user_id> - مسح صفقة اليوم للمستخدم"
         ],
         "daily_none": "لا يوجد صفقة اليوم حالياً.",
         "cleardaily_ok": "🧹 تم مسح صفقة اليوم.",
@@ -236,6 +255,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "withdraw_created": "✅ تم إنشاء طلب سحب #{req_id} بقيمة {amount}$.",
         "lang_menu_title": "اختر لغتك:",
         "lang_saved": "✅ تم ضبط اللغة العربية.",
+        "lang_updated_to": "✅ تم تحديث اللغة.",
         "choose_withdraw_amount": "اختر مبلغ السحب:",
         "requests_waiting": "طلباتك قيد الانتظار:",
         "no_requests": "لا توجد طلبات قيد الانتظار.",
@@ -252,6 +272,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "website_msg": "🔥 زر لزيارة موقعنا:",
         "website_not_set": "ℹ️ لم يتم ضبط رابط الموقع بعد.",
         "support_msg": "للتواصل مع الدعم اضغط الزر:",
+        "delwebsite_ok": "🗑️ تم حذف رابط الموقع.",
         # stats i18n
         "stats_title": "📊 إحصائياتك",
         "stats_wins": "✅ الأرباح: {sum}$ (عدد: {count})",
@@ -262,31 +283,68 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_line_loss": "{at} — خسارة -{amount}$",
         # admin replies
         "admin_only": "⚠️ هذا الأمر للأدمن فقط.",
-        "genkey_ok": "✅ تم توليد {n} مفتاح من نوع {t}.\nأول مفتاح:\n<code>{first}</code>",
+        "genkey_ok": "✅ تم توليد {n} مفتاح (شهري).\nأول مفتاح:\n<code>{first}</code>",
         "delkey_ok": "🗑️ تم حذف المفتاح.",
         "delkey_not_found": "❌ المفتاح غير موجود.",
         "delsub_ok": "🗑️ تم حذف اشتراك المستخدم {uid}.",
         "delsub_not_found": "ℹ️ لا يوجد اشتراك محفوظ لهذا المستخدم.",
         "subinfo_none": "ℹ️ لا يوجد اشتراك.",
         "subinfo_line": "📄 النوع: {t}\n🕒 الانتهاء: {exp}",
-    
+        "setwebsite_ok": "✅ تم ضبط رابط الموقع.",
+        "setwebsite_usage": "الصيغة: /setwebsite <URL>",
+        "gensub_ok": "✅ تم ضبط اشتراك المستخدم {uid}: {t} حتى {exp}.",
+        "gensub_usage": "الصيغة: /gensub <user_id> monthly | +days <n>",
+        # withdraw admin
         "admin_w_title": "🧾 طلبات السحب (قيد الانتظار)",
         "admin_w_none": "لا يوجد طلبات بانتظار الموافقة.",
         "admin_w_item": "#{id} — المستخدم {uid} — {amount}$ — {at}",
         "admin_w_approve": "✅ تمت الموافقة على طلب #{id}.",
         "admin_w_denied": "❌ تم رفض طلب #{id} وتمت إعادة المبلغ.",
-        "setwebsite_ok": "✅ تم ضبط رابط الموقع.",
-        "setwebsite_usage": "الصيغة: /setwebsite <URL>",
-        "gensub_ok": "✅ تم ضبط اشتراك المستخدم {uid}: {t} حتى {exp}.",
-        "gensub_usage": "الصيغة: /gensub <user_id> <daily|weekly|monthly|yearly|lifetime|+days> [days]"
-},
+        # buttons common
+        "approve_btn": "✅ موافقة",
+        "deny_btn": "❌ رفض",
+        "prev_btn": "⬅️ السابق",
+        "next_btn": "التالي ➡️",
+        "back_btn": "🔙 رجوع",
+        # players module
+        "players_title": "قائمة اللاعبين:",
+        "players_empty": "لا يوجد مستخدمون بعد.",
+        "players_page": "صفحة {cur}/{total}",
+        "players_search_btn": "🔎 بحث بالآيدي",
+        "players_search_prompt": "أرسل آيدي اللاعب أو '-' للإلغاء.",
+        "players_search_not_found": "الآيدي غير موجود. جرّب رقمًا آخر.",
+        "players_item_fmt": "{id} — {label}",
+        "player_view_title": "👤 المستخدم {id} — {label}",
+        "player_balance": "💰 الرصيد: {bal}$",
+        "player_stats": "📊 الإحصائيات: win={win}$ | loss={loss}$ | net={net}$",
+        "player_country": "🗺️ البلد: {country}",
+        "player_sub": "⏳ اشتراك: {remain}",
+        "edit_label_btn": "✏️ الاسم",
+        "edit_country_btn": "🌍 البلد",
+        "label_prompt": "أرسل الاسم الجديد للمستخدم {uid}. اكتب '-' لإزالة الاسم.",
+        "label_set_ok": "تم ضبط الاسم: {uid} — {label}",
+        "label_removed": "تم إزالة الاسم للمستخدم {uid}.",
+        "country_prompt": "أرسل اسم البلد للمستخدم {uid}. اكتب '-' لإزالة البلد.",
+        "country_set_ok": "تم ضبط البلد للمستخدم {uid}: {country}",
+        "country_removed": "تم إزالة البلد للمستخدم {uid}.",
+        # balances
+        "usage_addbal": "الصيغة: /addbal <user_id> <amount>",
+        "usage_takebal": "الصيغة: /takebal <user_id> <amount>",
+        "usage_setbal": "الصيغة: /setbal <user_id> <amount>",
+        "user_not_found": "المستخدم غير موجود.",
+        "invalid_amount": "مبلغ غير صالح.",
+        "bal_added_ok": "✅ تمت إضافة {amount}$ للمستخدم {uid}. الرصيد الجديد: {bal}$",
+        "bal_taken_ok": "✅ تم خصم {amount}$ من المستخدم {uid}. الرصيد الجديد: {bal}$",
+        "bal_set_ok": "✅ تم ضبط رصيد المستخدم {uid} إلى {bal}$",
+        "balance_linked_msg": "✅ تم ربط البوت بحسابك التداول ورصيدك {bal}$"
+    },
     "en": {
         "welcome": "👋 Welcome to the trading bot\n\n💰 Your balance: {balance}$\n⏳ Subscription ends in: {remain}\n🆔 Your ID: {user_id}",
-        "need_key": "🔑 Please enter your subscription key to activate the bot.\nTypes: daily / weekly / monthly / yearly / lifetime",
-        "key_ok": "✅ Your subscription ({stype}) is activated. Expires at: {exp}\nUse /start to open the menu.",
-        "key_ok_life": "✅ Your subscription ({stype}, lifetime) is activated. Enjoy!\nUse /start to open the menu.",
+        "need_key": "🔑 Please enter your subscription key to activate the bot.\nAvailable type: monthly only",
+        "key_ok": "✅ Your subscription (monthly) is activated. Expires at: {exp}\nUse /start to open the menu.",
+        "key_ok_life": "✅ Activated.\nUse /start to open the menu.",
         "key_invalid": "❌ Invalid or already used key. Try again.",
-        "key_expired": "⛔ Your subscription has expired. Please enter a new key.",
+        "key_expired": "⛔ Your subscription has expired. Please enter a new (monthly) key.",
         "btn_daily": "📈 Daily trade",
         "btn_withdraw": "💸 Withdraw",
         "btn_wstatus": "💼 Withdrawal requests",
@@ -299,12 +357,25 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "help_title": "🛠 Available commands:",
         "help_public": [
             "/start - Main menu",
+            "/help - Show help",
             "/id - Show your ID",
             "/balance - Your balance",
             "/daily - Daily trade",
-            "/withdraw &lt;amount&gt; - Request withdrawal",
+            "/withdraw - Withdraw",
             "/mystats - My stats",
-            "/genkey &lt;type&gt; [count] - generate keys (admin)"
+            "/players - Players list",
+            "/pfind <user_id> - Open a player directly"
+        ],
+        "help_admin": [
+            "/genkey monthly [count] - generate keys (monthly only)",
+            "/gensub <user_id> monthly | +days <n> - grant/extend subscription",
+            "/setwebsite <URL> - set website URL",
+            "/delwebsite - delete website URL",
+            "/addbal <user_id> <amount> - add balance",
+            "/takebal <user_id> <amount> - take balance",
+            "/setbal <user_id> <amount> - set balance",
+            "/setdaily <user_id> - set user's daily",
+            "/cleardaily <user_id> - clear user's daily"
         ],
         "daily_none": "No daily trade yet.",
         "cleardaily_ok": "🧹 Daily trade cleared.",
@@ -314,6 +385,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "withdraw_created": "✅ Withdrawal request #{req_id} created for {amount}$.",
         "lang_menu_title": "Choose your language:",
         "lang_saved": "✅ Language set to English.",
+        "lang_updated_to": "✅ Language updated.",
         "choose_withdraw_amount": "Choose withdraw amount:",
         "requests_waiting": "Your pending requests:",
         "no_requests": "No pending requests.",
@@ -328,6 +400,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "website_msg": "🔥 Tap to visit our website:",
         "website_not_set": "ℹ️ Website URL is not set yet.",
         "support_msg": "Tap below to contact support:",
+        "delwebsite_ok": "🗑️ Website URL removed.",
         "stats_title": "📊 Your statistics",
         "stats_wins": "✅ Wins: {sum}$ (count: {count})",
         "stats_losses": "❌ Losses: {sum}$ (count: {count})",
@@ -336,31 +409,64 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_line_win": "{at} — Win +{amount}$",
         "stats_line_loss": "{at} — Loss -{amount}$",
         "admin_only": "⚠️ Admins only.",
-        "genkey_ok": "✅ Generated {n} key(s) of type {t}.\nFirst key:\n<code>{first}</code>",
+        "genkey_ok": "✅ Generated {n} key(s) (monthly).\nFirst key:\n<code>{first}</code>",
         "delkey_ok": "🗑️ Key deleted.",
         "delkey_not_found": "❌ Key not found.",
         "delsub_ok": "🗑️ Subscription removed for user {uid}.",
         "delsub_not_found": "ℹ️ No subscription recorded for this user.",
         "subinfo_none": "ℹ️ No subscription.",
         "subinfo_line": "📄 Type: {t}\n🕒 Expires: {exp}",
-    
+        "setwebsite_ok": "✅ Website URL saved.",
+        "setwebsite_usage": "Usage: /setwebsite <URL>",
+        "gensub_ok": "✅ Subscription set for {uid}: {t} until {exp}.",
+        "gensub_usage": "Usage: /gensub <user_id> monthly | +days <n>",
         "admin_w_title": "🧾 Pending withdrawal requests",
         "admin_w_none": "No pending requests.",
         "admin_w_item": "#{id} — user {uid} — {amount}$ — {at}",
         "admin_w_approve": "✅ Request #{id} approved.",
         "admin_w_denied": "❌ Request #{id} denied and amount returned.",
-        "setwebsite_ok": "✅ Website URL saved.",
-        "setwebsite_usage": "Usage: /setwebsite <URL>",
-        "gensub_ok": "✅ Subscription set for {uid}: {t} until {exp}.",
-        "gensub_usage": "Usage: /gensub <user_id> <daily|weekly|monthly|yearly|lifetime|+days> [days]"
-},
+        "approve_btn": "✅ Approve",
+        "deny_btn": "❌ Deny",
+        "prev_btn": "⬅️ Prev",
+        "next_btn": "Next ➡️",
+        "back_btn": "🔙 Back",
+        "players_title": "Players list:",
+        "players_empty": "No users yet.",
+        "players_page": "Page {cur}/{total}",
+        "players_search_btn": "🔎 Search by ID",
+        "players_search_prompt": "Send the player ID, or '-' to cancel.",
+        "players_search_not_found": "ID not found. Try another.",
+        "players_item_fmt": "{id} — {label}",
+        "player_view_title": "👤 User {id} — {label}",
+        "player_balance": "💰 Balance: {bal}$",
+        "player_stats": "📊 Stats: win={win}$ | loss={loss}$ | net={net}$",
+        "player_country": "🗺️ Country: {country}",
+        "player_sub": "⏳ Subscription: {remain}",
+        "edit_label_btn": "✏️ Label",
+        "edit_country_btn": "🌍 Country",
+        "label_prompt": "Send new label for user {uid}. Send '-' to remove.",
+        "label_set_ok": "Label set: {uid} — {label}",
+        "label_removed": "Label removed for user {uid}.",
+        "country_prompt": "Send country for user {uid}. Send '-' to remove.",
+        "country_set_ok": "Country set for user {uid}: {country}",
+        "country_removed": "Country removed for user {uid}.",
+        "usage_addbal": "Usage: /addbal <user_id> <amount>",
+        "usage_takebal": "Usage: /takebal <user_id> <amount>",
+        "usage_setbal": "Usage: /setbal <user_id> <amount>",
+        "user_not_found": "User not found.",
+        "invalid_amount": "Invalid amount.",
+        "bal_added_ok": "✅ Added {amount}$ to {uid}. New balance: {bal}$",
+        "bal_taken_ok": "✅ Taken {amount}$ from {uid}. New balance: {bal}$",
+        "bal_set_ok": "✅ Balance set to {bal}$ for {uid}",
+        "balance_linked_msg": "✅ Your bot is linked to your trading account. Balance: {bal}$"
+    },
     "tr": {
         "welcome": "👋 Trading botuna hoş geldin\n\n💰 Bakiyen: {balance}$\n⏳ Abonelik bitimine: {remain}\n🆔 ID: {user_id}",
-        "need_key": "🔑 Botu etkinleştirmek için abonelik anahtarını gir.\nTürler: günlük / haftalık / aylık / yıllık / ömür boyu",
-        "key_ok": "✅ Aboneliğin ({stype}) etkin. Bitiş: {exp}\nMenü için /start.",
-        "key_ok_life": "✅ Abonelik ({stype}, ömür boyu) etkin. Keyfini çıkar!\nMenü için /start.",
+        "need_key": "🔑 Botu etkinleştirmek için abonelik anahtarını gir.\nMevcut tür: sadece aylık",
+        "key_ok": "✅ Aboneliğin (aylık) aktif. Bitiş: {exp}\nMenü için /start.",
+        "key_ok_life": "✅ Etkinleştirildi.\nMenü için /start.",
         "key_invalid": "❌ Geçersiz ya da kullanılmış anahtar. Tekrar dene.",
-        "key_expired": "⛔ Aboneliğin bitti. Lütfen yeni anahtar gir.",
+        "key_expired": "⛔ Aboneliğin bitti. Yeni (aylık) anahtar gir.",
         "btn_daily": "📈 Günün işlemi",
         "btn_withdraw": "💸 Çekim",
         "btn_wstatus": "💼 Çekim talepleri",
@@ -368,17 +474,30 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_lang": "🌐 Dil",
         "btn_deposit": "💳 Yatırma",
         "btn_website": "🌍 Web sitemiz",
-        "btn_support": "📞 Destek ile iletişim",
+        "btn_support": "📞 Destek",
         "btn_buy": "🛒 Abonelik satın al",
-        "help_title": "🛠 Kullanılabilir komutlar:",
+        "help_title": "🛠 Komutlar:",
         "help_public": [
             "/start - Ana menü",
-            "/id - ID'ni göster",
-            "/balance - Bakiyen",
+            "/help - Yardım",
+            "/id - ID'n",
+            "/balance - Bakiye",
             "/daily - Günün işlemi",
-            "/withdraw &lt;tutar&gt; - Çekim isteği",
+            "/withdraw - Çekim",
             "/mystats - İstatistiklerim",
-            "/genkey &lt;type&gt; [count] - anahtar üret (admin)"
+            "/players - Oyuncu listesi",
+            "/pfind <user_id> - Oyuncuyu aç"
+        ],
+        "help_admin": [
+            "/genkey monthly [count] - anahtar üret (sadece aylık)",
+            "/gensub <user_id> monthly | +days <n> - abonelik ver/uzat",
+            "/setwebsite <URL> - web sitesi ayarla",
+            "/delwebsite - web sitesini sil",
+            "/addbal <user_id> <amount> - bakiye ekle",
+            "/takebal <user_id> <amount> - bakiye düş",
+            "/setbal <user_id> <amount> - bakiyeyi ayarla",
+            "/setdaily <user_id> - kullanıcının günlük işlemi",
+            "/cleardaily <user_id> - günlük işlemi sil"
         ],
         "daily_none": "Henüz günlük işlem yok.",
         "cleardaily_ok": "🧹 Günlük işlem temizlendi.",
@@ -388,20 +507,22 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "withdraw_created": "✅ #{req_id} numaralı çekim talebi {amount}$ için oluşturuldu.",
         "lang_menu_title": "Dilini seç:",
         "lang_saved": "✅ Dil Türkçe olarak ayarlandı.",
+        "lang_updated_to": "✅ Dil güncellendi.",
         "choose_withdraw_amount": "Çekim tutarını seç:",
         "requests_waiting": "Bekleyen taleplerin:",
         "no_requests": "Bekleyen talep yok.",
         "deposit_choose": "Bir yatırma yöntemi seç:",
         "deposit_cash": "💵 Nakit",
         "deposit_paypal": "🅿️ PayPal",
-        "deposit_bank": "🏦 Banka Havalesi",
+        "deposit_bank": "🏦 Havale",
         "deposit_mc": "💳 Mastercard",
         "deposit_visa": "💳 Visa",
-        "deposit_msg": "{method} ile ödeme için lütfen doğrudan bizimle iletişime geçin. Aşağıya dokunun:",
+        "deposit_msg": "{method} ile ödeme için lütfen doğrudan bizimle iletişime geçin.",
         "contact_us": "📩 Bizimle iletişim",
-        "website_msg": "🔥 Web sitemizi ziyaret etmek için dokunun:",
+        "website_msg": "🔥 Web sitemizi ziyaret etmek için:",
         "website_not_set": "ℹ️ Website URL henüz ayarlı değil.",
-        "support_msg": "Destek ile iletişim için aşağı dokunun:",
+        "support_msg": "Destek için aşağı dokun:",
+        "delwebsite_ok": "🗑️ Web sitesi bağlantısı silindi.",
         "stats_title": "📊 İstatistiklerin",
         "stats_wins": "✅ Kazançlar: {sum}$ (adet: {count})",
         "stats_losses": "❌ Kayıplar: {sum}$ (adet: {count})",
@@ -410,31 +531,64 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_line_win": "{at} — Kazanç +{amount}$",
         "stats_line_loss": "{at} — Kayıp -{amount}$",
         "admin_only": "⚠️ Sadece admin.",
-        "genkey_ok": "✅ {t} türünden {n} anahtar üretildi.\nİlk anahtar:\n<code>{first}</code>",
+        "genkey_ok": "✅ {n} anahtar üretildi (aylık).\nİlk anahtar:\n<code>{first}</code>",
         "delkey_ok": "🗑️ Anahtar silindi.",
         "delkey_not_found": "❌ Anahtar bulunamadı.",
         "delsub_ok": "🗑️ {uid} kullanıcısının aboneliği silindi.",
         "delsub_not_found": "ℹ️ Bu kullanıcı için abonelik bulunmuyor.",
         "subinfo_none": "ℹ️ Abonelik yok.",
         "subinfo_line": "📄 Tür: {t}\n🕒 Bitiş: {exp}",
-    
+        "setwebsite_ok": "✅ Website kaydedildi.",
+        "setwebsite_usage": "Kullanım: /setwebsite <URL>",
+        "gensub_ok": "✅ {uid} için abonelik ayarlandı: {t} — {exp}.",
+        "gensub_usage": "Kullanım: /gensub <user_id> monthly | +days <n>",
         "admin_w_title": "🧾 Bekleyen çekim talepleri",
         "admin_w_none": "Bekleyen talep yok.",
         "admin_w_item": "#{id} — kullanıcı {uid} — {amount}$ — {at}",
         "admin_w_approve": "✅ #{id} talebi onaylandı.",
         "admin_w_denied": "❌ #{id} talebi reddedildi ve tutar iade edildi.",
-        "setwebsite_ok": "✅ Web sitesi kaydedildi.",
-        "setwebsite_usage": "Kullanım: /setwebsite <URL>",
-        "gensub_ok": "✅ {uid} için abonelik ayarlandı: {t} — {exp}.",
-        "gensub_usage": "Kullanım: /gensub <user_id> <daily|weekly|monthly|yearly|lifetime|+days> [days]"
-},
+        "approve_btn": "✅ Onayla",
+        "deny_btn": "❌ Reddet",
+        "prev_btn": "⬅️ Önceki",
+        "next_btn": "Sonraki ➡️",
+        "back_btn": "🔙 Geri",
+        "players_title": "Oyuncu listesi:",
+        "players_empty": "Henüz kullanıcı yok.",
+        "players_page": "Sayfa {cur}/{total}",
+        "players_search_btn": "🔎 ID ile ara",
+        "players_search_prompt": "Oyuncu ID'si gönder veya '-' ile iptal.",
+        "players_search_not_found": "ID bulunamadı. Başka bir tane dene.",
+        "players_item_fmt": "{id} — {label}",
+        "player_view_title": "👤 Kullanıcı {id} — {label}",
+        "player_balance": "💰 Bakiye: {bal}$",
+        "player_stats": "📊 İstatistik: win={win}$ | loss={loss}$ | net={net}$",
+        "player_country": "🗺️ Ülke: {country}",
+        "player_sub": "⏳ Abonelik: {remain}",
+        "edit_label_btn": "✏️ İsim",
+        "edit_country_btn": "🌍 Ülke",
+        "label_prompt": "{uid} için yeni isim gönder. Kaldırmak için '-' gönder.",
+        "label_set_ok": "İsim ayarlandı: {uid} — {label}",
+        "label_removed": "{uid} için isim kaldırıldı.",
+        "country_prompt": "{uid} için ülke gönder. Kaldırmak için '-' gönder.",
+        "country_set_ok": "{uid} için ülke ayarlandı: {country}",
+        "country_removed": "{uid} için ülke kaldırıldı.",
+        "usage_addbal": "Kullanım: /addbal <user_id> <amount>",
+        "usage_takebal": "Kullanım: /takebal <user_id> <amount>",
+        "usage_setbal": "Kullanım: /setbal <user_id> <amount>",
+        "user_not_found": "Kullanıcı bulunamadı.",
+        "invalid_amount": "Geçersiz tutar.",
+        "bal_added_ok": "✅ {uid} kullanıcısına {amount}$ eklendi. Yeni bakiye: {bal}$",
+        "bal_taken_ok": "✅ {uid} kullanıcısından {amount}$ düşüldü. Yeni bakiye: {bal}$",
+        "bal_set_ok": "✅ {uid} için bakiye {bal}$ olarak ayarlandı",
+        "balance_linked_msg": "✅ Bot hesabınla eşlendi. Bakiyen: {bal}$"
+    },
     "es": {
         "welcome": "👋 Bienvenido al bot de trading\n\n💰 Tu saldo: {balance}$\n⏳ La suscripción termina en: {remain}\n🆔 Tu ID: {user_id}",
-        "need_key": "🔑 Ingresa tu clave de suscripción para activar el bot.\nTipos: diario / semanal / mensual / anual / de por vida",
-        "key_ok": "✅ Tu suscripción ({stype}) está activa. Expira: {exp}\nUsa /start para abrir el menú.",
-        "key_ok_life": "✅ Suscripción ({stype}, de por vida) activada. ¡Disfruta!\nUsa /start para abrir el menú.",
+        "need_key": "🔑 Ingresa tu clave de suscripción para activar el bot.\nTipo disponible: solo mensual",
+        "key_ok": "✅ Tu suscripción (mensual) está activa. Expira: {exp}\nUsa /start para abrir el menú.",
+        "key_ok_life": "✅ Activado.\nUsa /start para abrir el menú.",
         "key_invalid": "❌ Clave inválida o ya usada. Intenta de nuevo.",
-        "key_expired": "⛔ Tu suscripción expiró. Ingresa una nueva clave.",
+        "key_expired": "⛔ Tu suscripción expiró. Ingresa una nueva clave (mensual).",
         "btn_daily": "📈 Operación del día",
         "btn_withdraw": "💸 Retirar",
         "btn_wstatus": "💼 Solicitudes de retiro",
@@ -444,15 +598,28 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_website": "🌍 Sitio web",
         "btn_support": "📞 Contactar soporte",
         "btn_buy": "🛒 Comprar suscripción",
-        "help_title": "🛠 Comandos disponibles:",
+        "help_title": "🛠 Comandos:",
         "help_public": [
             "/start - Menú principal",
-            "/id - Mostrar tu ID",
+            "/help - Ayuda",
+            "/id - Tu ID",
             "/balance - Tu saldo",
             "/daily - Operación del día",
-            "/withdraw &lt;monto&gt; - Solicitar retiro",
+            "/withdraw - Retiro",
             "/mystats - Mis estadísticas",
-            "/genkey &lt;type&gt; [count] - generar claves (admin)"
+            "/players - Lista de usuarios",
+            "/pfind <user_id> - Abrir usuario"
+        ],
+        "help_admin": [
+            "/genkey monthly [count] - generar claves (solo mensual)",
+            "/gensub <user_id> monthly | +days <n> - otorgar/extender suscripción",
+            "/setwebsite <URL> - guardar sitio web",
+            "/delwebsite - eliminar sitio web",
+            "/addbal <user_id> <amount> - agregar saldo",
+            "/takebal <user_id> <amount> - quitar saldo",
+            "/setbal <user_id> <amount> - fijar saldo",
+            "/setdaily <user_id> - fijar operación diaria",
+            "/cleardaily <user_id> - borrar operación diaria"
         ],
         "daily_none": "Aún no hay operación del día.",
         "cleardaily_ok": "🧹 Operación del día eliminada.",
@@ -462,6 +629,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "withdraw_created": "✅ Solicitud #{req_id} creada por {amount}$.",
         "lang_menu_title": "Elige tu idioma:",
         "lang_saved": "✅ Idioma configurado a español.",
+        "lang_updated_to": "✅ Idioma actualizado.",
         "choose_withdraw_amount": "Elige el monto a retirar:",
         "requests_waiting": "Tus solicitudes pendientes:",
         "no_requests": "No hay solicitudes pendientes.",
@@ -471,11 +639,12 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_bank": "🏦 Transferencia bancaria",
         "deposit_mc": "💳 Mastercard",
         "deposit_visa": "💳 Visa",
-        "deposit_msg": "Para pagar con {method}, contáctanos directamente. Pulsa abajo:",
+        "deposit_msg": "Para pagar con {method}, contáctanos directamente.",
         "contact_us": "📩 Contáctanos",
-        "website_msg": "🔥 Pulsa para visitar nuestro sitio:",
-        "website_not_set": "ℹ️ La URL del sitio aún no está configurada.",
+        "website_msg": "🔥 Visita nuestro sitio:",
+        "website_not_set": "ℹ️ La URL del sitio no está configurada.",
         "support_msg": "Pulsa abajo para contactar soporte:",
+        "delwebsite_ok": "🗑️ URL del sitio eliminada.",
         "stats_title": "📊 Tus estadísticas",
         "stats_wins": "✅ Ganancias: {sum}$ (conteo: {count})",
         "stats_losses": "❌ Pérdidas: {sum}$ (conteo: {count})",
@@ -483,22 +652,65 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_no_data": "Aún no hay operaciones.",
         "stats_line_win": "{at} — Ganancia +{amount}$",
         "stats_line_loss": "{at} — Pérdida -{amount}$",
-        "admin_only": "⚠️ Solo para administradores.",
-        "genkey_ok": "✅ Generadas {n} claves tipo {t}.\nPrimera clave:\n<code>{first}</code>",
+        "admin_only": "⚠️ Solo administradores.",
+        "genkey_ok": "✅ {n} clave(s) generadas (mensual).\nPrimera clave:\n<code>{first}</code>",
         "delkey_ok": "🗑️ Clave eliminada.",
         "delkey_not_found": "❌ Clave no encontrada.",
         "delsub_ok": "🗑️ Suscripción eliminada para el usuario {uid}.",
-        "delsub_not_found": "ℹ️ No hay suscripción registrada para este usuario.",
+        "delsub_not_found": "ℹ️ No hay suscripción registrada.",
         "subinfo_none": "ℹ️ Sin suscripción.",
         "subinfo_line": "📄 Tipo: {t}\n🕒 Expira: {exp}",
+        "setwebsite_ok": "✅ URL del sitio guardada.",
+        "setwebsite_usage": "Uso: /setwebsite <URL>",
+        "gensub_ok": "✅ Suscripción para {uid}: {t} hasta {exp}.",
+        "gensub_usage": "Uso: /gensub <user_id> monthly | +days <n>",
+        "admin_w_title": "🧾 Solicitudes de retiro pendientes",
+        "admin_w_none": "No hay solicitudes pendientes.",
+        "admin_w_item": "#{id} — usuario {uid} — {amount}$ — {at}",
+        "admin_w_approve": "✅ Solicitud #{id} aprobada.",
+        "admin_w_denied": "❌ Solicitud #{id} rechazada y monto devuelto.",
+        "approve_btn": "✅ Aprobar",
+        "deny_btn": "❌ Rechazar",
+        "prev_btn": "⬅️ Anterior",
+        "next_btn": "Siguiente ➡️",
+        "back_btn": "🔙 Atrás",
+        "players_title": "Lista de usuarios:",
+        "players_empty": "Aún no hay usuarios.",
+        "players_page": "Página {cur}/{total}",
+        "players_search_btn": "🔎 Buscar por ID",
+        "players_search_prompt": "Envía el ID del usuario o '-' para cancelar.",
+        "players_search_not_found": "ID no encontrado. Prueba otro.",
+        "players_item_fmt": "{id} — {label}",
+        "player_view_title": "👤 Usuario {id} — {label}",
+        "player_balance": "💰 Saldo: {bal}$",
+        "player_stats": "📊 Estadísticas: win={win}$ | loss={loss}$ | net={net}$",
+        "player_country": "🗺️ País: {country}",
+        "player_sub": "⏳ Suscripción: {remain}",
+        "edit_label_btn": "✏️ Nombre",
+        "edit_country_btn": "🌍 País",
+        "label_prompt": "Envía el nombre para {uid}. '-' para eliminar.",
+        "label_set_ok": "Nombre guardado: {uid} — {label}",
+        "label_removed": "Nombre eliminado para {uid}.",
+        "country_prompt": "Envía el país para {uid}. '-' para eliminar.",
+        "country_set_ok": "País guardado para {uid}: {country}",
+        "country_removed": "País eliminado para {uid}.",
+        "usage_addbal": "Uso: /addbal <user_id> <amount>",
+        "usage_takebal": "Uso: /takebal <user_id> <amount>",
+        "usage_setbal": "Uso: /setbal <user_id> <amount>",
+        "user_not_found": "Usuario no encontrado.",
+        "invalid_amount": "Monto inválido.",
+        "bal_added_ok": "✅ Agregado {amount}$ a {uid}. Nuevo saldo: {bal}$",
+        "bal_taken_ok": "✅ Quitado {amount}$ de {uid}. Nuevo saldo: {bal}$",
+        "bal_set_ok": "✅ Saldo fijado en {bal}$ para {uid}",
+        "balance_linked_msg": "✅ Bot vinculado a tu cuenta de trading. Saldo: {bal}$"
     },
     "fr": {
         "welcome": "👋 Bienvenue dans le bot de trading\n\n💰 Votre solde : {balance}$\n⏳ L’abonnement se termine dans : {remain}\n🆔 Votre ID : {user_id}",
-        "need_key": "🔑 Veuillez saisir votre clé d’abonnement pour activer le bot.\nTypes : quotidien / hebdomadaire / mensuel / annuel / à vie",
-        "key_ok": "✅ Votre abonnement ({stype}) est activé. Expire : {exp}\nUtilisez /start pour ouvrir le menu.",
-        "key_ok_life": "✅ Abonnement ({stype}, à vie) activé. Profitez-en !\nUtilisez /start pour ouvrir le menu.",
+        "need_key": "🔑 Saisissez votre clé d’abonnement pour activer le bot.\nType disponible : mensuel uniquement",
+        "key_ok": "✅ Votre abonnement (mensuel) est activé. Expire : {exp}\nUtilisez /start pour ouvrir le menu.",
+        "key_ok_life": "✅ Activé.\nUtilisez /start pour ouvrir le menu.",
         "key_invalid": "❌ Clé invalide ou déjà utilisée. Réessayez.",
-        "key_expired": "⛔ Votre abonnement a expiré. Veuillez saisir une nouvelle clé.",
+        "key_expired": "⛔ Votre abonnement a expiré. Veuillez saisir une nouvelle clé (mensuelle).",
         "btn_daily": "📈 Trade du jour",
         "btn_withdraw": "💸 Retrait",
         "btn_wstatus": "💼 Demandes de retrait",
@@ -506,17 +718,30 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "btn_lang": "🌐 Langue",
         "btn_deposit": "💳 Dépôt",
         "btn_website": "🌍 Site web",
-        "btn_support": "📞 Contacter le support",
+        "btn_support": "📞 Support",
         "btn_buy": "🛒 Acheter un abonnement",
-        "help_title": "🛠 Commandes disponibles :",
+        "help_title": "🛠 Commandes :",
         "help_public": [
             "/start - Menu principal",
-            "/id - Afficher votre ID",
+            "/help - Aide",
+            "/id - Votre ID",
             "/balance - Votre solde",
             "/daily - Trade du jour",
-            "/withdraw &lt;montant&gt; - Demander un retrait",
+            "/withdraw - Retrait",
             "/mystats - Mes statistiques",
-            "/genkey &lt;type&gt; [count] - générer des clés (admin)"
+            "/players - Liste des utilisateurs",
+            "/pfind <user_id> - Ouvrir un utilisateur"
+        ],
+        "help_admin": [
+            "/genkey monthly [count] - générer des clés (mensuel uniquement)",
+            "/gensub <user_id> monthly | +days <n> - accorder/prolonger l’abonnement",
+            "/setwebsite <URL> - définir l’URL du site",
+            "/delwebsite - supprimer l’URL du site",
+            "/addbal <user_id> <amount> - ajouter du solde",
+            "/takebal <user_id> <amount> - retirer du solde",
+            "/setbal <user_id> <amount> - définir le solde",
+            "/setdaily <user_id> - définir le trade du jour (utilisateur)",
+            "/cleardaily <user_id> - effacer le trade du jour (utilisateur)"
         ],
         "daily_none": "Aucun trade du jour pour le moment.",
         "cleardaily_ok": "🧹 Trade du jour effacé.",
@@ -526,6 +751,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "withdraw_created": "✅ Demande #{req_id} créée pour {amount}$.",
         "lang_menu_title": "Sélectionnez votre langue :",
         "lang_saved": "✅ Langue définie sur le français.",
+        "lang_updated_to": "✅ Langue mise à jour.",
         "choose_withdraw_amount": "Choisissez le montant du retrait :",
         "requests_waiting": "Vos demandes en attente :",
         "no_requests": "Aucune demande en attente.",
@@ -535,11 +761,12 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "deposit_bank": "🏦 Virement bancaire",
         "deposit_mc": "💳 Mastercard",
         "deposit_visa": "💳 Visa",
-        "deposit_msg": "Pour payer via {method}, contactez-nous directement. Appuyez ci-dessous :",
+        "deposit_msg": "Pour payer via {method}, contactez-nous directement.",
         "contact_us": "📩 Nous contacter",
-        "website_msg": "🔥 Appuyez pour visiter notre site :",
+        "website_msg": "🔥 Visitez notre site :",
         "website_not_set": "ℹ️ L’URL du site n’est pas encore définie.",
         "support_msg": "Appuyez ci-dessous pour contacter le support :",
+        "delwebsite_ok": "🗑️ URL du site supprimée.",
         "stats_title": "📊 Vos statistiques",
         "stats_wins": "✅ Gains : {sum}$ (nombre : {count})",
         "stats_losses": "❌ Pertes : {sum}$ (nombre : {count})",
@@ -548,27 +775,71 @@ TEXT: Dict[str, Dict[str, Any]] = {
         "stats_line_win": "{at} — Gain +{amount}$",
         "stats_line_loss": "{at} — Perte -{amount}$",
         "admin_only": "⚠️ Réservé aux administrateurs.",
-        "genkey_ok": "✅ {n} clé(s) de type {t} générée(s).\nPremière clé :\n<code>{first}</code>",
+        "genkey_ok": "✅ {n} clé(s) générée(s) (mensuel).\nPremière clé :\n<code>{first}</code>",
         "delkey_ok": "🗑️ Clé supprimée.",
         "delkey_not_found": "❌ Clé introuvable.",
         "delsub_ok": "🗑️ Abonnement supprimé pour l’utilisateur {uid}.",
         "delsub_not_found": "ℹ️ Aucun abonnement enregistré pour cet utilisateur.",
         "subinfo_none": "ℹ️ Aucun abonnement.",
         "subinfo_line": "📄 Type : {t}\n🕒 Expire : {exp}",
+        "setwebsite_ok": "✅ URL du site enregistrée.",
+        "setwebsite_usage": "Utilisation : /setwebsite <URL>",
+        "gensub_ok": "✅ Abonnement défini pour {uid} : {t} jusqu’à {exp}.",
+        "gensub_usage": "Utilisation : /gensub <user_id> monthly | +days <n>",
+        "admin_w_title": "🧾 Demandes de retrait en attente",
+        "admin_w_none": "Aucune demande en attente.",
+        "admin_w_item": "#{id} — utilisateur {uid} — {amount}$ — {at}",
+        "admin_w_approve": "✅ Demande #{id} approuvée.",
+        "admin_w_denied": "❌ Demande #{id} refusée et montant renvoyé.",
+        "approve_btn": "✅ Approuver",
+        "deny_btn": "❌ Refuser",
+        "prev_btn": "⬅️ Préc.",
+        "next_btn": "Suiv. ➡️",
+        "back_btn": "🔙 Retour",
+        "players_title": "Liste des utilisateurs :",
+        "players_empty": "Aucun utilisateur pour le moment.",
+        "players_page": "Page {cur}/{total}",
+        "players_search_btn": "🔎 Rechercher par ID",
+        "players_search_prompt": "Envoyez l’ID utilisateur, ou '-' pour annuler.",
+        "players_search_not_found": "ID introuvable. Essayez un autre.",
+        "players_item_fmt": "{id} — {label}",
+        "player_view_title": "👤 Utilisateur {id} — {label}",
+        "player_balance": "💰 Solde : {bal}$",
+        "player_stats": "📊 Statistiques : win={win}$ | loss={loss}$ | net={net}$",
+        "player_country": "🗺️ Pays : {country}",
+        "player_sub": "⏳ Abonnement : {remain}",
+        "edit_label_btn": "✏️ Nom",
+        "edit_country_btn": "🌍 Pays",
+        "label_prompt": "Envoyez le nom pour {uid}. '-' pour supprimer.",
+        "label_set_ok": "Nom défini : {uid} — {label}",
+        "label_removed": "Nom supprimé pour {uid}.",
+        "country_prompt": "Envoyez le pays pour {uid}. '-' pour supprimer.",
+        "country_set_ok": "Pays défini pour {uid} : {country}",
+        "country_removed": "Pays supprimé pour {uid}.",
+        "usage_addbal": "Utilisation : /addbal <user_id> <amount>",
+        "usage_takebal": "Utilisation : /takebal <user_id> <amount>",
+        "usage_setbal": "Utilisation : /setbal <user_id> <amount>",
+        "user_not_found": "Utilisateur introuvable.",
+        "invalid_amount": "Montant invalide.",
+        "bal_added_ok": "✅ Ajouté {amount}$ à {uid}. Nouveau solde : {bal}$",
+        "bal_taken_ok": "✅ Retiré {amount}$ de {uid}. Nouveau solde : {bal}$",
+        "bal_set_ok": "✅ Solde défini à {bal}$ pour {uid}",
+        "balance_linked_msg": "✅ Bot lié à votre compte de trading. Solde : {bal}$"
     }
 }
-
 
 def _status_label(code: str, lang: str) -> str:
     labels = {
         "ar": {"pending":"بانتظار الموافقة","approved":"مقبولة","denied":"مرفوضة","canceled":"ملغاة"},
         "en": {"pending":"Pending","approved":"Approved","denied":"Denied","canceled":"Canceled"},
         "tr": {"pending":"Beklemede","approved":"Onaylandı","denied":"Reddedildi","canceled":"İptal"},
+        "es": {"pending":"Pendiente","approved":"Aprobada","denied":"Rechazada","canceled":"Cancelada"},
+        "fr": {"pending":"En attente","approved":"Approuvée","denied":"Refusée","canceled":"Annulée"}
     }
-    m = labels.get(lang, labels["ar"])
+    m = labels.get(lang, labels["en"])
     return m.get(code, code)
 
-
+# ---------- Users & i18n helpers ----------
 def get_lang(uid: str) -> str:
     users = load_json("users.json") or {}
     lang = (users.get(uid, {}) or {}).get("lang", "en")
@@ -582,7 +853,7 @@ def set_lang(uid: str, lang: str) -> None:
 
 def T(user_uid: str, key: str, **kwargs) -> str:
     lang = get_lang(user_uid)
-    s = TEXT.get(lang, TEXT["ar"]).get(key, "")
+    s = TEXT.get(lang, TEXT["en"]).get(key, "")
     try:
         return s.format(**kwargs)
     except Exception:
@@ -601,7 +872,6 @@ def ensure_user(chat_id: int) -> str:
         }
         save_json("users.json", users)
     else:
-        # upgrade to admin if now in ADMIN_IDS
         if chat_id in ADMIN_IDS and users.get(uid, {}).get("role") != "admin":
             users[uid]["role"] = "admin"
             save_json("users.json", users)
@@ -644,7 +914,6 @@ def show_main_menu(chat_id: int):
 # ---------- Subscription flow ----------
 def require_active_or_ask(chat_id: int) -> bool:
     uid = ensure_user(chat_id)
-
     if is_sub_active(uid):
         users = load_json("users.json") or {}
         if users.get(uid, {}).get("await_key"):
@@ -669,15 +938,16 @@ def show_need_key_prompt(chat_id: int, uid: str):
     bot.send_message(chat_id, msg, reply_markup=kb)
 
 def _rand_key(n=4) -> str:
-    import random, string
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
 
 def generate_keys(k_type: str, count: int) -> List[str]:
+    if k_type != "monthly":
+        raise ValueError("Only 'monthly' keys are allowed")
     keys = _key_store()
     out: List[str] = []
     for _ in range(count):
         while True:
-            k = f"{k_type[:2].upper()}-{_rand_key()}-{_rand_key()}-{_rand_key()}"
+            k = f"MO-{_rand_key()}-{_rand_key()}-{_rand_key()}"
             if k not in keys:
                 break
         keys[k] = {"type": k_type, "created_at": _now_str()}
@@ -692,30 +962,22 @@ def activate_key_for_user(uid: str, key: str) -> Optional[str]:
         return None
 
     ktype = meta.get("type")
-    days = DURATIONS.get(ktype)
+    if ktype != "monthly":
+        return None
 
+    days = DURATIONS.get(ktype, 30)
     users = load_json("users.json") or {}
     users.setdefault(uid, {})
 
-    if days is None:
-        exp = None
-        users[uid]["sub"] = {"type": ktype, "expire_at": exp, "key": key}
-        users[uid]["await_key"] = False
-        keys[key]["used_by"] = uid
-        keys[key]["used_at"] = _now_str()
-        _save_keys(keys)
-        save_json("users.json", users)
-        return T(uid, "key_ok_life", stype=ktype)
-    else:
-        exp_dt = _now() + timedelta(days=days)
-        exp = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
-        users[uid]["sub"] = {"type": ktype, "expire_at": exp, "key": key}
-        users[uid]["await_key"] = False
-        keys[key]["used_by"] = uid
-        keys[key]["used_at"] = _now_str()
-        _save_keys(keys)
-        save_json("users.json", users)
-        return T(uid, "key_ok", stype=ktype, exp=exp)
+    exp_dt = _now() + timedelta(days=days)
+    exp = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
+    users[uid]["sub"] = {"type": ktype, "expire_at": exp, "key": key}
+    users[uid]["await_key"] = False
+    keys[key]["used_by"] = uid
+    keys[key]["used_at"] = _now_str()
+    _save_keys(keys)
+    save_json("users.json", users)
+    return T(uid, "key_ok", stype=ktype, exp=exp)
 
 # ---------- Commands ----------
 @bot.message_handler(commands=["start"])
@@ -730,47 +992,19 @@ def cmd_lang(message: types.Message):
     uid = ensure_user(message.chat.id)
     return bot.reply_to(message, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
 
-
 @bot.message_handler(commands=["help"])
 def cmd_help(message: types.Message):
     uid = ensure_user(message.chat.id)
-    is_admin = message.chat.id in ADMIN_IDS
+    tt = TEXT[get_lang(uid)]
+    is_adm = is_admin(uid)
+    lines = [f"<b>{tt['help_title']}</b>"]
+    lines.extend(tt["help_public"])
+    if is_adm:
+        lines.append("")
+        lines.extend(tt["help_admin"])
+    bot.send_message(message.chat.id, "\n".join(f"• {x}" if not x.startswith("<b>") else x for x in lines))
 
-    public_cmds = [
-        "/start - Start / restart",
-        "/help - Show this help",
-        "/id - Show your ID",
-        "/balance - Show your balance",
-        "/daily - Your daily trades text",
-        "/withdraw - Withdraw menu",
-        "/wlist - My withdrawal requests status",
-        "/lang - Language menu",
-    ]
-    admin_cmds = [
-        "/genkey <type> [count] - Generate keys (daily/weekly/monthly/yearly/lifetime)",
-        "/delkey <KEY> - Delete a key",
-        "/delsub <user_id> - Delete user's subscription",
-        "/subinfo <user_id> - Show user's subscription info",
-        "/users - Users list with paging",
-        "/setdaily <user_id> - Set daily trades text for user",
-        "/cleardaily <user_id> - Clear daily trades text for user",
-        "/setwebsite <url> - Set website (if supported)",
-        "/gensub <type> <user_id> - Grant a subscription (if supported)",
-    ]
-
-    txt = ["<b>Help</b>"]
-    txt.append("Public commands:")
-    for c in public_cmds:
-        txt.append(f"• {c}")
-    if is_admin:
-        txt.append("")
-        txt.append("<b>Admin commands</b>:")
-        for c in admin_cmds:
-            txt.append(f"• {c}")
-
-    bot.send_message(message.chat.id, "\n".join(txt))
-
-
+@bot.message_handler(commands=["id"])
 def cmd_id(message: types.Message):
     uid = ensure_user(message.chat.id)
     if not require_active_or_ask(message.chat.id):
@@ -791,7 +1025,7 @@ def cmd_daily(message: types.Message):
     uid = ensure_user(message.chat.id)
     if not require_active_or_ask(message.chat.id):
         return
-    daily = load_daily_text() or TEXT[get_lang(uid)]["daily_none"]
+    daily = load_daily_text_for(uid) or TEXT[get_lang(uid)]["daily_none"]
     bot.reply_to(message, daily if isinstance(daily, str) else str(daily))
 
 @bot.message_handler(commands=["withdraw"])
@@ -808,7 +1042,6 @@ def cmd_withdraw(message: types.Message):
         return bot.reply_to(message, TEXT[get_lang(uid)]["withdraw_invalid"])
     return create_withdraw_request(message.chat.id, uid, amount)
 
-
 @bot.message_handler(commands=["wlist"])
 def cmd_wlist(message: types.Message):
     uid = ensure_user(message.chat.id)
@@ -816,48 +1049,7 @@ def cmd_wlist(message: types.Message):
         return bot.reply_to(message, T(uid, "admin_only"))
     return _wlist_send_page(message.chat.id, 1)
 
-def _wlist_send_page(chat_id: int, page: int):
-    uid = ensure_user(chat_id)
-    withdraw_requests = load_json("withdraw_requests.json") or {}
-    pending = sorted([(rid, r) for rid, r in withdraw_requests.items() if r.get("status") == "pending"],
-                     key=lambda x: int(x[0]))
-    if not pending:
-        return bot.send_message(chat_id, T(uid, "admin_w_none"))
-    per = 10
-    total = len(pending)
-    pages = (total + per - 1) // per
-    if page < 1: page = 1
-    if page > pages: page = pages
-    start = (page - 1) * per
-    chunk = pending[start:start+per]
-    bot.send_message(chat_id, T(uid, "admin_w_title") + f" — {total} total — page {page}/{pages}")
-    for rid, r in chunk:
-        at = r.get("created_at","")
-        txt = T(uid, "admin_w_item", id=rid, uid=r.get("user_id",""), amount=r.get("amount",0), at=at)
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"wapp_{rid}"),
-               types.InlineKeyboardButton("❌ Deny", callback_data=f"wden_{rid}"))
-        bot.send_message(chat_id, txt, reply_markup=kb)
-    nav = types.InlineKeyboardMarkup()
-    prev_p = page-1 if page>1 else 1
-    next_p = page+1 if page<pages else pages
-    nav.add(types.InlineKeyboardButton("⬅️ Prev", callback_data=f"wpage_{prev_p}"),
-            types.InlineKeyboardButton("➡️ Next", callback_data=f"wpage_{next_p}"))
-    bot.send_message(chat_id, f"Page {page}/{pages}", reply_markup=nav)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("wpage_"))
-def cb_wpage(call: types.CallbackQuery):
-    uid = ensure_user(call.from_user.id)
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-    try:
-        page = int((call.data or "wpage_1").split("_",1)[1])
-    except Exception:
-        page = 1
-    return _wlist_send_page(call.message.chat.id, page)
-
+# --- WEBSITE ---
 @bot.message_handler(commands=["setwebsite"])
 def cmd_setwebsite(message: types.Message):
     uid = ensure_user(message.chat.id)
@@ -871,6 +1063,18 @@ def cmd_setwebsite(message: types.Message):
     save_settings(s)
     return bot.reply_to(message, T(uid, "setwebsite_ok"))
 
+@bot.message_handler(commands=["delwebsite"])
+def cmd_delwebsite(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return bot.reply_to(message, T(uid, "admin_only"))
+    s = load_settings()
+    if "WEBSITE_URL" in s:
+        s.pop("WEBSITE_URL", None)
+        save_settings(s)
+    return bot.reply_to(message, T(uid, "delwebsite_ok"))
+
+# --- GENSUB (monthly only or +days) ---
 @bot.message_handler(commands=["gensub"])
 def cmd_gensub(message: types.Message):
     uid_admin = ensure_user(message.chat.id)
@@ -885,15 +1089,13 @@ def cmd_gensub(message: types.Message):
     users.setdefault(target, {"balance": 0, "role": "user", "created_at": _now_str(), "lang": "en"})
     sub = users[target].get("sub", {})
     now = _now()
-    if mode in DURATIONS:
-        days = DURATIONS[mode]
-        if days is None:
-            exp_str = None
-        else:
-            exp_dt = now + timedelta(days=days)
-            exp_str = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
-        users[target]["sub"] = {"type": mode, "expire_at": exp_str, "key": "MANUAL"}
+    if mode == "monthly":
+        exp_dt = now + timedelta(days=DURATIONS["monthly"])
+        exp_str = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
+        users[target]["sub"] = {"type": "monthly", "expire_at": exp_str, "key": "MANUAL"}
     elif mode == "+days":
+        if len(parts) < 4:
+            return bot.reply_to(message, T(uid_admin, "gensub_usage"))
         try:
             add_days = int(parts[3])
         except Exception:
@@ -906,14 +1108,14 @@ def cmd_gensub(message: types.Message):
         else:
             base = now
         new_exp = (base + timedelta(days=add_days)).strftime("%Y-%m-%d %H:%M:%S")
-        users[target]["sub"] = {"type": sub.get("type","manual"), "expire_at": new_exp, "key": "MANUAL"}
+        users[target]["sub"] = {"type": "monthly", "expire_at": new_exp, "key": "MANUAL"}
     else:
         return bot.reply_to(message, T(uid_admin, "gensub_usage"))
     save_json("users.json", users)
-    exp_show = users[target]["sub"].get("expire_at","∞") or "∞"
+    exp_show = users[target]["sub"].get("expire_at","—") or "—"
     return bot.reply_to(message, T(uid_admin, "gensub_ok", uid=target, t=users[target]["sub"].get("type","-"), exp=exp_show))
 
-
+# --- GENKEY monthly only ---
 @bot.message_handler(commands=["genkey"])
 def cmd_genkey(message: types.Message):
     uid = ensure_user(message.chat.id)
@@ -921,10 +1123,10 @@ def cmd_genkey(message: types.Message):
         return bot.reply_to(message, T(uid, "admin_only"))
     parts = (message.text or "").split()
     if len(parts) < 2:
-        return bot.reply_to(message, "Usage: /genkey <daily|weekly|monthly|yearly|lifetime> [count]")
+        return bot.reply_to(message, "Usage: /genkey monthly [count]")
     ktype = parts[1].lower()
-    if ktype not in DURATIONS:
-        return bot.reply_to(message, "Usage: /genkey <daily|weekly|monthly|yearly|lifetime> [count]")
+    if ktype != "monthly":
+        return bot.reply_to(message, "Usage: /genkey monthly [count]")
     try:
         count = int(parts[2]) if len(parts) > 2 else 1
         if count < 1 or count > 100:
@@ -935,12 +1137,12 @@ def cmd_genkey(message: types.Message):
     if count == 1:
         return bot.reply_to(message, T(uid, "genkey_ok", n=count, t=ktype, first=keys[0]))
     else:
-        txt = "\\n".join(keys)
+        txt = "\n".join(keys)
         try:
             bot.reply_to(message, T(uid, "genkey_ok", n=count, t=ktype, first=keys[0]))
             bot.send_document(message.chat.id, ("keys.txt", txt.encode("utf-8")))
         except Exception:
-            bot.reply_to(message, "Generated keys:\\n" + ("\\n".join(f"<code>{k}</code>" for k in keys)))
+            bot.reply_to(message, "Generated keys:\n" + ("\n".join(f"<code>{k}</code>" for k in keys)))
 
 @bot.message_handler(commands=["delkey"])
 def cmd_delkey(message: types.Message):
@@ -986,17 +1188,18 @@ def cmd_subinfo(message: types.Message):
     if not sub:
         return bot.reply_to(message, T(uid, "subinfo_none"))
     t = sub.get("type", "-")
-    exp = sub.get("expire_at", "∞")
+    exp = sub.get("expire_at", "—")
     return bot.reply_to(message, T(uid, "subinfo_line", t=t, exp=exp))
 
 # ---------- Withdraw Helpers ----------
 def open_withdraw_menu(chat_id: int, uid: str):
+    tt = TEXT[get_lang(uid)]
     mm = types.InlineKeyboardMarkup()
     for amount in [10, 20, 30, 50, 100]:
         mm.add(types.InlineKeyboardButton(f"{amount}$", callback_data=f"withdraw_{amount}"))
-    mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"))
-    mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-    bot.send_message(chat_id, TEXT[get_lang(uid)]["choose_withdraw_amount"], reply_markup=mm)
+    mm.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
+    mm.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
+    bot.send_message(chat_id, tt["choose_withdraw_amount"], reply_markup=mm)
 
 def create_withdraw_request(chat_id: int, uid: str, amount: int):
     if amount <= 0:
@@ -1005,10 +1208,8 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     bal = (users.get(uid, {}) or {}).get("balance", 0)
     if bal < amount:
         return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_insufficient"].format(bal=bal))
-    users.setdefault(uid, {"balance": 0})
-    users[uid]["balance"] = bal - amount
-    save_json("users.json", users)
 
+    # Create request first
     withdraw_requests = load_json("withdraw_requests.json") or {}
     req_id = str(len(withdraw_requests) + 1)
     withdraw_requests[req_id] = {
@@ -1016,18 +1217,20 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
         "created_at": _now_str()
     }
     save_json("withdraw_requests.json", withdraw_requests)
+
+    # Then deduct balance
+    users.setdefault(uid, {"balance": 0})
+    users[uid]["balance"] = bal - amount
+    save_json("users.json", users)
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=req_id, amount=amount))
 
-# ---------- Callbacks ----------
+# ---------- Language callbacks ----------
 @bot.callback_query_handler(func=lambda c: c.data=="lang_menu")
 def cb_lang_menu(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
-
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("set_lang_"))
 def cb_set_lang(call: types.CallbackQuery):
@@ -1036,90 +1239,330 @@ def cb_set_lang(call: types.CallbackQuery):
     if code in ("ar","en","tr","es","fr"):
         set_lang(uid, code)
     try:
-        bot.answer_callback_query(call.id, text="Language updated")
+        bot.answer_callback_query(call.id, text=TEXT[get_lang(uid)]["lang_updated_to"])
     except Exception:
         pass
+    if not is_sub_active(uid):
+        show_need_key_prompt(call.message.chat.id, uid)
+    else:
+        show_main_menu(call.message.chat.id)
+
+# ---------- Stats command (localized) ----------
+@bot.message_handler(commands=["mystats"])
+def cmd_mystats(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not require_active_or_ask(message.chat.id):
+        return
+    txt = _stats_text(uid, uid)
+    mm = types.InlineKeyboardMarkup()
+    tt = TEXT[get_lang(uid)]
+    mm.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"),
+           types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
+    return bot.send_message(message.chat.id, txt, reply_markup=mm)
+
+# ---------- Players (replace users) ----------
+PAGE_SIZE = 10
+_pending_label: Dict[int, Tuple[str,int]] = {}
+_pending_country: Dict[int, Tuple[str,int]] = {}
+_pending_player_search: Dict[int, int] = {}
+
+def list_user_ids() -> List[int]:
+    users = load_json("users.json") or {}
+    for uid,u in users.items():
+        if "label" not in u: u["label"] = None
+        if "country" not in u: u["country"] = None
+    save_json("users.json", users)
+    return sorted([int(x) for x in users.keys()])
+
+def _user_label(uid: str) -> str:
+    users = load_json("users.json") or {}
+    return (users.get(uid, {}) or {}).get("label") or "(no name)"
+
+def _sub_remaining(uid: str) -> str:
     try:
-        # If user is not subscribed, stay on key prompt instead of opening main menu
+        return sub_remaining_str(uid)
+    except Exception:
+        return "—"
+
+@bot.message_handler(commands=["players", "users"])
+def cmd_players(message: types.Message):
+    uid = ensure_user(message.chat.id)
+    if not is_admin(uid):
+        return
+    show_players_page(message.chat.id, 1)
+
+def show_players_page(chat_id: int, page: int=1):
+    admin_uid = ensure_user(chat_id)
+    tt = TEXT[get_lang(admin_uid)]
+    ids = list_user_ids()
+    if not ids:
+        return bot.send_message(chat_id, tt["players_empty"])
+    start = (page-1)*PAGE_SIZE
+    chunk = ids[start:start+PAGE_SIZE]
+    kb = types.InlineKeyboardMarkup()
+    for i in chunk:
+        sid = str(i)
+        label = _html.escape(_user_label(sid))
+        kb.add(types.InlineKeyboardButton(tt["players_item_fmt"].format(id=sid, label=label),
+                                          callback_data=f"players:view:{sid}:{page}"))
+    # search + nav
+    nav = []
+    if page>1: nav.append(types.InlineKeyboardButton(tt["prev_btn"], callback_data=f"players:page:{page-1}"))
+    if start+PAGE_SIZE < len(ids): nav.append(types.InlineKeyboardButton(tt["next_btn"], callback_data=f"players:page:{page+1}"))
+    if nav: kb.row(*nav)
+    kb.add(types.InlineKeyboardButton(tt["players_search_btn"], callback_data=f"players:search:{page}"))
+    bot.send_message(chat_id, tt["players_title"], reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("players:page:"))
+def cb_players_page(c: types.CallbackQuery):
+    admin_uid = ensure_user(c.from_user.id)
+    if not is_admin(admin_uid):
+        return bot.answer_callback_query(c.id)
+    tt = TEXT[get_lang(admin_uid)]
+    page = int((c.data or "").split(":")[-1])
+    ids = list_user_ids()
+    start = (page-1)*PAGE_SIZE
+    chunk = ids[start:start+PAGE_SIZE]
+    kb = types.InlineKeyboardMarkup()
+    for i in chunk:
+        sid = str(i)
+        label = _html.escape(_user_label(sid))
+        kb.add(types.InlineKeyboardButton(tt["players_item_fmt"].format(id=sid, label=label),
+                                          callback_data=f"players:view:{sid}:{page}"))
+    nav = []
+    if page>1: nav.append(types.InlineKeyboardButton(tt["prev_btn"], callback_data=f"players:page:{page-1}"))
+    if start+PAGE_SIZE < len(ids): nav.append(types.InlineKeyboardButton(tt["next_btn"], callback_data=f"players:page:{page+1}"))
+    if nav: kb.row(*nav)
+    kb.add(types.InlineKeyboardButton(tt["players_search_btn"], callback_data=f"players:search:{page}"))
+    try:
+        bot.edit_message_text(tt["players_title"], c.message.chat.id, c.message.message_id, reply_markup=kb)
+    except Exception:
+        bot.send_message(c.message.chat.id, tt["players_title"], reply_markup=kb)
+    bot.answer_callback_query(c.id)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("players:view:"))
+def cb_player_view(c: types.CallbackQuery):
+    admin_uid = ensure_user(c.from_user.id)
+    if not is_admin(admin_uid):
+        return bot.answer_callback_query(c.id)
+    _,_,sid,page = c.data.split(":")
+    uid = sid
+    users = load_json("users.json") or {}
+    u = users.get(uid, {}) or {}
+    bal = float(u.get("balance", 0))
+    stats = _get_stats()
+    st = stats.get(uid, {"total_win":0.0,"total_loss":0.0})
+    win = float(st.get("total_win",0.0)); loss=float(st.get("total_loss",0.0)); net=win-loss
+    country = _html.escape(u.get("country") or "—")
+    remain = _sub_remaining(uid)
+    label = _html.escape(u.get("label") or "(no name)")
+
+    tt = TEXT[get_lang(admin_uid)]
+    txt = (f"{tt['player_view_title'].format(id=uid, label=label)}\n"
+           f"{tt['player_balance'].format(bal=bal):s}\n"
+           f"{tt['player_stats'].format(win=f'{win:.2f}', loss=f'{loss:.2f}', net=f'{net:.2f}'):s}\n"
+           f"{tt['player_country'].format(country=country):s}\n"
+           f"{tt['player_sub'].format(remain=remain):s}")
+
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton(tt["edit_label_btn"], callback_data=f"players:label:{uid}:{page}"),
+        types.InlineKeyboardButton(tt["edit_country_btn"], callback_data=f"players:country:{uid}:{page}")
+    )
+    kb.row(types.InlineKeyboardButton(tt["back_btn"], callback_data=f"players:page:{page}"))
+    try:
+        bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+    except Exception:
+        bot.send_message(c.message.chat.id, txt, reply_markup=kb)
+    bot.answer_callback_query(c.id)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("players:label:"))
+def cb_player_label(c: types.CallbackQuery):
+    admin_uid = ensure_user(c.from_user.id)
+    if not is_admin(admin_uid):
+        return bot.answer_callback_query(c.id)
+    _,_,uid,page = c.data.split(":")
+    _pending_label[c.from_user.id] = (uid, int(page))
+    bot.answer_callback_query(c.id, T(admin_uid, "label_prompt", uid=uid))
+    bot.send_message(c.message.chat.id, T(admin_uid, "label_prompt", uid=uid))
+
+@bot.message_handler(func=lambda m: m.from_user.id in _pending_label)
+def on_admin_label(m: types.Message):
+    uid, page = _pending_label.pop(m.from_user.id)
+    admin_uid = ensure_user(m.from_user.id)
+    users = load_json("users.json") or {}
+    u = users.setdefault(uid, {})
+    val = (m.text or "").strip()
+    if val == "-" or val == "":
+        u["label"] = None
+        msg = T(admin_uid, "label_removed", uid=uid)
+    else:
+        u["label"] = val[:32]
+        msg = T(admin_uid, "label_set_ok", uid=uid, label=_html.escape(u['label']))
+    save_json("users.json", users)
+    bot.reply_to(m, msg)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("players:country:"))
+def cb_player_country(c: types.CallbackQuery):
+    admin_uid = ensure_user(c.from_user.id)
+    if not is_admin(admin_uid):
+        return bot.answer_callback_query(c.id)
+    _,_,uid,page = c.data.split(":")
+    _pending_country[c.from_user.id] = (uid, int(page))
+    bot.answer_callback_query(c.id, T(admin_uid, "country_prompt", uid=uid))
+    bot.send_message(c.message.chat.id, T(admin_uid, "country_prompt", uid=uid))
+
+@bot.message_handler(func=lambda m: m.from_user.id in _pending_country)
+def on_admin_country(m: types.Message):
+    uid, page = _pending_country.pop(m.from_user.id)
+    admin_uid = ensure_user(m.from_user.id)
+    users = load_json("users.json") or {}
+    u = users.setdefault(uid, {})
+    val = (m.text or "").strip()
+    if val == "-" or val == "":
+        u["country"] = None
+        msg = T(admin_uid, "country_removed", uid=uid)
+    else:
+        u["country"] = val[:32]
+        msg = T(admin_uid, "country_set_ok", uid=uid, country=_html.escape(u['country']))
+    save_json("users.json", users)
+    bot.reply_to(m, msg)
+
+# --- Players search ---
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("players:search:"))
+def cb_players_search(c: types.CallbackQuery):
+    admin_uid = ensure_user(c.from_user.id)
+    if not is_admin(admin_uid):
+        return bot.answer_callback_query(c.id)
+    page = int((c.data or "players:search:1").split(":")[-1])
+    _pending_player_search[c.from_user.id] = page
+    bot.answer_callback_query(c.id)
+    bot.send_message(c.message.chat.id, T(admin_uid, "players_search_prompt"))
+
+@bot.message_handler(func=lambda m: m.from_user.id in _pending_player_search)
+def on_players_search(m: types.Message):
+    admin_uid = ensure_user(m.from_user.id)
+    page = _pending_player_search.get(m.from_user.id, 1)
+    txt = (m.text or "").strip()
+    if txt == "-":
+        _pending_player_search.pop(m.from_user.id, None)
+        return show_players_page(m.chat.id, page)
+    if not txt.isdigit():
+        return bot.reply_to(m, T(admin_uid, "players_search_not_found"))
+    uid = txt
+    users = load_json("users.json") or {}
+    if uid not in users:
+        return bot.reply_to(m, T(admin_uid, "players_search_not_found"))
+    # open view
+    c = types.SimpleNamespace()
+    c.from_user = types.SimpleNamespace(id=m.from_user.id)
+    c.message = types.SimpleNamespace(chat=m.chat, message_id=m.message_id)
+    c.data = f"players:view:{uid}:{page}"
+    return cb_player_view(c)
+
+# ---------- Balances (admin) ----------
+def _parse_amount(s: str) -> Optional[float]:
+    try:
+        v = float(s)
+        if v <= 0 or v > 1_000_000:
+            return None
+        return round(v, 2)
+    except Exception:
+        return None
+
+def _notify_balance(uid: str):
+    users = load_json("users.json") or {}
+    bal = float((users.get(uid, {}) or {}).get("balance", 0))
+    try:
+        bot.send_message(int(uid), T(uid, "balance_linked_msg", bal=f"{bal:.2f}"))
+    except Exception:
+        pass
+
+@bot.message_handler(commands=["addbal"])
+def cmd_addbal(message: types.Message):
+    admin_uid = ensure_user(message.chat.id)
+    if not is_admin(admin_uid):
+        return bot.reply_to(message, T(admin_uid, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return bot.reply_to(message, T(admin_uid, "usage_addbal"))
+    uid = parts[1]
+    amount = _parse_amount(parts[2])
+    users = load_json("users.json") or {}
+    if amount is None:
+        return bot.reply_to(message, T(admin_uid, "invalid_amount"))
+    if uid not in users:
+        return bot.reply_to(message, T(admin_uid, "user_not_found"))
+    users[uid]["balance"] = float(users[uid].get("balance", 0)) + amount
+    save_json("users.json", users)
+    bot.reply_to(message, T(admin_uid, "bal_added_ok", uid=uid, amount=f"{amount:.2f}", bal=f"{users[uid]['balance']:.2f}"))
+    _notify_balance(uid)
+
+@bot.message_handler(commands=["takebal"])
+def cmd_takebal(message: types.Message):
+    admin_uid = ensure_user(message.chat.id)
+    if not is_admin(admin_uid):
+        return bot.reply_to(message, T(admin_uid, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return bot.reply_to(message, T(admin_uid, "usage_takebal"))
+    uid = parts[1]
+    amount = _parse_amount(parts[2])
+    users = load_json("users.json") or {}
+    if amount is None:
+        return bot.reply_to(message, T(admin_uid, "invalid_amount"))
+    if uid not in users:
+        return bot.reply_to(message, T(admin_uid, "user_not_found"))
+    users[uid]["balance"] = max(0.0, float(users[uid].get("balance", 0)) - amount)
+    save_json("users.json", users)
+    bot.reply_to(message, T(admin_uid, "bal_taken_ok", uid=uid, amount=f"{amount:.2f}", bal=f"{users[uid]['balance']:.2f}"))
+    _notify_balance(uid)
+
+@bot.message_handler(commands=["setbal"])
+def cmd_setbal(message: types.Message):
+    admin_uid = ensure_user(message.chat.id)
+    if not is_admin(admin_uid):
+        return bot.reply_to(message, T(admin_uid, "admin_only"))
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return bot.reply_to(message, T(admin_uid, "usage_setbal"))
+    uid = parts[1]
+    amount = _parse_amount(parts[2])
+    users = load_json("users.json") or {}
+    if amount is None:
+        return bot.reply_to(message, T(admin_uid, "invalid_amount"))
+    if uid not in users:
+        return bot.reply_to(message, T(admin_uid, "user_not_found"))
+    users[uid]["balance"] = amount
+    save_json("users.json", users)
+    bot.reply_to(message, T(admin_uid, "bal_set_ok", uid=uid, bal=f"{users[uid]['balance']:.2f}"))
+    _notify_balance(uid)
+
+# ---------- General callbacks (non-players) ----------
+@bot.callback_query_handler(func=lambda call: call.data=="go_back")
+def cb_go_back(call: types.CallbackQuery):
+    uid = ensure_user(call.from_user.id)
+    try:
         if not is_sub_active(uid):
             show_need_key_prompt(call.message.chat.id, uid)
         else:
             show_main_menu(call.message.chat.id)
     except Exception:
         pass
-@bot.callback_query_handler(func=lambda call: True)
+
+@bot.callback_query_handler(func=lambda call: call.data in ("daily_trade","withdraw_menu","withdraw_status","deposit","website","support") or call.data.startswith(("withdraw_","dep_","cancel_","wapp_","wden_")))
 def callbacks(call: types.CallbackQuery):
     uid = ensure_user(call.from_user.id)
+    tt = TEXT[get_lang(uid)]
     data = call.data or ""
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-
-    # --- BACK FIX: handle go_back first ---
-    if data == "go_back":
-        if not is_sub_active(uid):
-            return show_need_key_prompt(call.message.chat.id, uid)
-        return show_main_menu(call.message.chat.id)
-
-    # --- USERS route-through ---
-    if data.startswith("users:"):
-        if data.startswith("users:page:"):
-            return cb_users_page(call)
-        if data.startswith("users:view:"):
-            return cb_user_view(call)
-        if data.startswith("users:label:"):
-            return cb_user_label(call)
-        if data.startswith("users:country:"):
-            return cb_user_country(call)
-
-        data = call.data or ""
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-    # --- BACK FIX ---
-    if data == "go_back":
-        if not is_sub_active(uid):
-            return show_need_key_prompt(call.message.chat.id, uid)
-        return show_main_menu(call.message.chat.id)
-    # --- USERS route-through ---
-    if data.startswith("users:"):
-        if data.startswith("users:page:"):
-            return cb_users_page(call)
-        if data.startswith("users:view:"):
-            return cb_user_view(call)
-        if data.startswith("users:label:"):
-            return cb_user_label(call)
-        if data.startswith("users:country:"):
-            return cb_user_country(call)
-
-    uid = ensure_user(call.from_user.id)
-    data = call.data or ""
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-
-    if data.startswith("set_lang_"):
-        code = data.split("_")[-1]
-        if code in ("ar","en","tr","es","fr"):
-            set_lang(uid, code)
-            try:
-                bot.send_message(call.message.chat.id, TEXT[get_lang(uid)]["lang_saved"])
-            except Exception:
-                pass
-            try:
-                show_main_menu(call.message.chat.id)
-            except Exception:
-                pass
-        return
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
 
     if data == "daily_trade":
-        daily = load_daily_text() or TEXT[get_lang(uid)]["daily_none"]
+        daily = load_daily_text_for(uid) or tt["daily_none"]
         mm = types.InlineKeyboardMarkup()
-        mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
-               types.InlineKeyboardButton("🔙", callback_data="go_back"))
+        mm.add(types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"),
+               types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
         return bot.send_message(call.message.chat.id, daily if isinstance(daily, str) else str(daily), reply_markup=mm)
 
     if data == "withdraw_menu":
@@ -1133,8 +1576,8 @@ def callbacks(call: types.CallbackQuery):
             if req.get("user_id") == uid and req.get("status") == "pending":
                 mm.add(types.InlineKeyboardButton(f"❌ cancel {req.get('amount',0)}$", callback_data=f"cancel_{req_id}"))
                 found = True
-        mm.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        msg = TEXT[get_lang(uid)]["requests_waiting"] if found else TEXT[get_lang(uid)]["no_requests"]
+        mm.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
+        msg = tt["requests_waiting"] if found else tt["no_requests"]
         return bot.send_message(call.message.chat.id, msg, reply_markup=mm)
 
     if data.startswith("withdraw_"):
@@ -1145,6 +1588,9 @@ def callbacks(call: types.CallbackQuery):
         return create_withdraw_request(call.message.chat.id, uid, amount)
 
     if data.startswith("wapp_") or data.startswith("wden_"):
+        # Admin gate
+        if not is_admin(uid):
+            return
         rid = data.split("_",1)[1]
         withdraw_requests = load_json("withdraw_requests.json") or {}
         req = withdraw_requests.get(rid)
@@ -1177,40 +1623,7 @@ def callbacks(call: types.CallbackQuery):
                 pass
             return bot.send_message(call.message.chat.id, T(uid, "admin_w_denied", id=rid))
 
-    if data.startswith("cancel_"):
-        req_id = data.split("_", 1)[1]
-        withdraw_requests = load_json("withdraw_requests.json") or {}
-        req = withdraw_requests.get(req_id)
-        if req and req.get("user_id") == uid and req.get("status") == "pending":
-            users = load_json("users.json") or {}
-            users.setdefault(uid, {"balance": 0})
-            users[uid]["balance"] = users[uid].get("balance", 0) + int(req.get("amount", 0))
-            save_json("users.json", users)
-            req["status"] = "canceled"
-            save_json("withdraw_requests.json", withdraw_requests)
-            return bot.send_message(call.message.chat.id, f"❎ Canceled request #{req_id}")
-        return bot.send_message(call.message.chat.id, "Nothing to cancel.")
-
-    if data == "stats":
-        txt = _stats_text(uid, uid)
-        mm = types.InlineKeyboardMarkup()
-        mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
-               types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, txt, reply_markup=mm)
-
-    if data == "deposit":
-        tt = TEXT[get_lang(uid)]
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(tt["deposit_cash"], callback_data="dep_cash"))
-        kb.add(types.InlineKeyboardButton(tt["deposit_paypal"], callback_data="dep_paypal"))
-        kb.add(types.InlineKeyboardButton(tt["deposit_bank"], callback_data="dep_bank"))
-        kb.add(types.InlineKeyboardButton(tt["deposit_mc"], callback_data="dep_mc"))
-        kb.add(types.InlineKeyboardButton(tt["deposit_visa"], callback_data="dep_visa"))
-        kb.add(types.InlineKeyboardButton("🔙", callback_data="go_back"))
-        return bot.send_message(call.message.chat.id, tt["deposit_choose"], reply_markup=kb)
-
     if data.startswith("dep_"):
-        tt = TEXT[get_lang(uid)]
         method_map = {
             "dep_cash": tt["deposit_cash"],
             "dep_paypal": tt["deposit_paypal"],
@@ -1221,12 +1634,20 @@ def callbacks(call: types.CallbackQuery):
         method = method_map.get(data, "Payment")
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(tt["contact_us"], url="https://t.me/qlsupport"))
-        kb.add(types.InlineKeyboardButton("🔙", callback_data="deposit"))
+        kb.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="deposit"))
         return bot.send_message(call.message.chat.id, tt["deposit_msg"].format(method=method), reply_markup=kb)
 
+    if data == "deposit":
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(tt["deposit_cash"], callback_data="dep_cash"))
+        kb.add(types.InlineKeyboardButton(tt["deposit_paypal"], callback_data="dep_paypal"))
+        kb.add(types.InlineKeyboardButton(tt["deposit_bank"], callback_data="dep_bank"))
+        kb.add(types.InlineKeyboardButton(tt["deposit_mc"], callback_data="dep_mc"))
+        kb.add(types.InlineKeyboardButton(tt["deposit_visa"], callback_data="dep_visa"))
+        kb.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
+        return bot.send_message(call.message.chat.id, tt["deposit_choose"], reply_markup=kb)
+
     if data == "website":
-        tt = TEXT[get_lang(uid)]
-        # will be replaced by getter later
         url_site = get_website_url()
         if url_site:
             kb = types.InlineKeyboardMarkup()
@@ -1236,61 +1657,11 @@ def callbacks(call: types.CallbackQuery):
             return bot.send_message(call.message.chat.id, tt["website_not_set"])
 
     if data == "support":
-        tt = TEXT[get_lang(uid)]
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(tt["contact_us"], url="https://t.me/qlsupport"))
         return bot.send_message(call.message.chat.id, tt["support_msg"], reply_markup=kb)
 
-# ---------- Fallback command router ----------
-ZERO_WIDTH = "\\u200f\\u200e\\u2066\\u2067\\u2068\\u2069\\u200b\\uFEFF"
-def norm_text(txt: str) -> str:
-    if not txt: return ""
-    t = txt.strip()
-    for ch in ZERO_WIDTH:
-        t = t.replace(ch, "")
-    return t.replace("／","/").replace("⁄","/")
-
-def dispatch_command(message: types.Message):
-    raw = norm_text(message.text or "")
-    cmd = raw.split()[0].lower()
-    if cmd in ("/lang","lang","/language","language"):
-        return cmd_lang(message) if 'cmd_lang' in globals() else cmd_language(message)
-    log.info("DISPATCH raw=%r parsed_cmd=%s", raw, cmd)
-    if cmd in ("/start", "start"):
-        return cmd_start(message)
-    if cmd in ("/help", "help"):
-        return cmd_help(message)
-    if cmd in ("/id", "id"):
-        return cmd_id(message)
-    if cmd in ("/balance", "balance"):
-        return cmd_balance(message)
-    if cmd.startswith("/daily") or cmd == "daily":
-        return cmd_daily(message)
-    if cmd.startswith("/withdraw") or cmd == "withdraw":
-        return cmd_withdraw(message)
-    if cmd.startswith("/users") or cmd == "users":
-        return cmd_users(message)
-    if cmd.startswith("/setdaily"):
-        return cmd_setdaily(message)
-    if cmd.startswith("/cleardaily"):
-        return cmd_cleardaily(message)
-    if cmd.startswith('/users') or cmd == 'users':
-        return cmd_users(message)
-    if cmd.startswith('/setdaily'):
-        return cmd_setdaily(message)
-    if cmd.startswith('/cleardaily'):
-        return cmd_cleardaily(message)
-    return
-
-@bot.message_handler(func=lambda m: bool(m.text and m.text.strip().startswith(("/", "／", "⁄"))))
-def any_command_like(message: types.Message):
-    try:
-        return dispatch_command(message)
-    except Exception as e:
-        log.error("fallback dispatch error: %s", e)
-
-
-# ---------- Key input when awaiting ----------
+# ---------- Fallback key activation ----------
 KEY_RE = re.compile(r"^[A-Z]{2}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$")
 
 @bot.message_handler(func=lambda m: bool(m.text) and not m.text.strip().startswith(("/", "／", "⁄")))
@@ -1302,29 +1673,19 @@ def maybe_activate_key(message: types.Message):
         if KEY_RE.match(key):
             resp = activate_key_for_user(uid, key)
             if resp:
-                try:
-                    bot.reply_to(message, resp)
-                except Exception:
-                    pass
-                try:
-                    show_main_menu(message.chat.id)
-                except Exception:
-                    pass
+                try: bot.reply_to(message, resp)
+                except Exception: pass
+                try: show_main_menu(message.chat.id)
+                except Exception: pass
                 return
-        # invalid
-        try:
-            bot.reply_to(message, TEXT[get_lang(uid)]["key_invalid"])
-        except Exception:
-            pass
-        try:
-            show_need_key_prompt(message.chat.id, uid)
-        except Exception:
-            pass
+        try: bot.reply_to(message, TEXT[get_lang(uid)]["key_invalid"])
+        except Exception: pass
+        try: show_need_key_prompt(message.chat.id, uid)
+        except Exception: pass
         return
-    # if not awaiting key, ignore and let other handlers work
     return
 
-# ---------- Minimal stats placeholders to match calls ----------
+# ---------- Stats storage ----------
 def _get_stats(): return load_json("stats.json") or {}
 def _save_stats(d): save_json("stats.json", d)
 def _add_stat(user_id: str, kind: str, amount: float):
@@ -1337,23 +1698,25 @@ def _add_stat(user_id: str, kind: str, amount: float):
     _save_stats(stats); return u
 
 def _stats_text(uid_viewer: str, target_uid: str):
+    tt = TEXT[get_lang(uid_viewer)]
     stats = _get_stats()
     u = stats.get(target_uid, {"total_win": 0.0, "total_loss": 0.0, "history": []})
     win_sum = float(u.get("total_win", 0.0))
     loss_sum = float(u.get("total_loss", 0.0))
     hist = u.get("history", []) or []
     win_cnt = sum(1 for h in hist if (h or {}).get("kind") == "win")
-    loss_cnt = sum(1 for h in hist if (h or {}).get("kind") == "loss")
+    loss_cnt = sum(1 for h in hist if (h or {}) .get("kind") == "loss")
     net = win_sum - loss_sum
-    arrow = "🟢" if net >= 0 else "🔴"
     return (
-        "📊 <b>Statistics</b>\n"
-        f"✅ Wins: <b>{win_sum:.2f}$</b>  (count: {win_cnt})\n"
-        f"❌ Losses: <b>{loss_sum:.2f}$</b>  (count: {loss_cnt})\n"
-        f"⚖️ Net: {arrow} <b>{net:.2f}$</b>"
+        f"{tt['stats_title']}\n"
+        f"{tt['stats_wins'].format(sum=f'{win_sum:.2f}', count=win_cnt)}\n"
+        f"{tt['stats_losses'].format(sum=f'{loss_sum:.2f}', count=loss_cnt)}\n"
+        f"{tt['stats_net'].format(net=f'{net:.2f}')}"
     )
-def health():
 
+# ---------- Health & Webhook ----------
+@app.route("/healthz", methods=["GET"])
+def healthz():
     return "OK", 200
 
 @app.route(f"/{API_TOKEN}", methods=["GET", "POST"])
@@ -1390,205 +1753,3 @@ if WEBHOOK_URL:
 else:
     Thread(target=start_polling, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
-
-@bot.callback_query_handler(func=lambda c: c.data == "go_back")
-def cb_go_back(call: types.CallbackQuery):
-    uid = ensure_user(call.from_user.id)
-    try:
-        if not is_sub_active(uid):
-            show_need_key_prompt(call.message.chat.id, uid)
-        else:
-            show_main_menu(call.message.chat.id)
-    except Exception:
-        pass
-
-
-# ---------- Admin: /users with paging, label & country ----------
-PAGE_SIZE = 10
-_pending_label = {}   # admin_id -> (target_uid, back_page)
-_pending_country = {} # admin_id -> (target_uid, back_page)
-
-def list_user_ids() -> list:
-    users = load_json("users.json") or {}
-    # ensure label/country keys exists
-    for uid,u in users.items():
-        if "label" not in u: u["label"] = None
-        if "country" not in u: u["country"] = None
-    save_json("users.json", users)
-    return sorted([int(x) for x in users.keys()])
-
-def _user_label(uid: str) -> str:
-    users = load_json("users.json") or {}
-    return (users.get(uid, {}) or {}).get("label") or "(no name)"
-
-def _sub_remaining(uid: str) -> str:
-    # reuse existing function if any; fallback simple
-    try:
-        return sub_remaining_str(uid)
-    except Exception:
-        return "—"
-
-@bot.message_handler(commands=["users"])
-def cmd_users(message: types.Message):
-    uid = ensure_user(message.chat.id)
-    if message.chat.id not in ADMIN_IDS:
-        return
-    show_users_page(message.chat.id, 1)
-
-def show_users_page(chat_id: int, page: int=1):
-    ids = list_user_ids()
-    if not ids:
-        return bot.send_message(chat_id, "لا يوجد مستخدمون بعد.")
-    start = (page-1)*PAGE_SIZE
-    chunk = ids[start:start+PAGE_SIZE]
-    kb = types.InlineKeyboardMarkup()
-    for i in chunk:
-        sid = str(i)
-        kb.add(types.InlineKeyboardButton(f"{sid} — {_user_label(sid)}", callback_data=f"users:view:{sid}:{page}"))
-    nav = []
-    if page>1: nav.append(types.InlineKeyboardButton("⬅️ السابق", callback_data=f"users:page:{page-1}"))
-    if start+PAGE_SIZE < len(ids): nav.append(types.InlineKeyboardButton("التالي ➡️", callback_data=f"users:page:{page+1}"))
-    if nav: kb.row(*nav)
-    bot.send_message(chat_id, "قائمة المستخدمين:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:page:"))
-def cb_users_page(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS:
-        return bot.answer_callback_query(c.id)
-    page = int((c.data or "").split(":")[-1])
-    ids = list_user_ids()
-    start = (page-1)*PAGE_SIZE
-    chunk = ids[start:start+PAGE_SIZE]
-    kb = types.InlineKeyboardMarkup()
-    for i in chunk:
-        sid = str(i)
-        kb.add(types.InlineKeyboardButton(f"{sid} — {_user_label(sid)}", callback_data=f"users:view:{sid}:{page}"))
-    nav = []
-    if page>1: nav.append(types.InlineKeyboardButton("⬅️ السابق", callback_data=f"users:page:{page-1}"))
-    if start+PAGE_SIZE < len(ids): nav.append(types.InlineKeyboardButton("التالي ➡️", callback_data=f"users:page:{page+1}"))
-    if nav: kb.row(*nav)
-    try:
-        bot.edit_message_text(f"قائمة المستخدمين:", c.message.chat.id, c.message.message_id, reply_markup=kb)
-    except Exception:
-        bot.send_message(c.message.chat.id, "قائمة المستخدمين:", reply_markup=kb)
-    bot.answer_callback_query(c.id)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:view:"))
-def cb_user_view(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS:
-        return bot.answer_callback_query(c.id)
-    _,_,sid,page = c.data.split(":")
-    uid = sid
-    users = load_json("users.json") or {}
-    u = users.get(uid, {}) or {}
-    bal = float(u.get("balance", 0))
-    stats = _get_stats()
-    st = stats.get(uid, {"total_win":0.0,"total_loss":0.0})
-    win = float(st.get("total_win",0.0)); loss=float(st.get("total_loss",0.0)); net=win-loss
-    country = u.get("country") or "—"
-    remain = _sub_remaining(uid)
-
-    txt = (f"👤 <b>User {uid}</b> — {(u.get('label') or '(no name)')}\n"
-           f"💰 الرصيد: {bal:.2f}$\n"
-           f"📊 الإحصائيات: win={win:.2f} | loss={loss:.2f} | net={net:.2f}\n"
-           f"🗺️ البلد: {country}\n"
-           f"⏳ اشتراك: {remain}")
-
-    kb = types.InlineKeyboardMarkup()
-    kb.row(
-        types.InlineKeyboardButton("✏️ الاسم", callback_data=f"users:label:{uid}:{page}"),
-        types.InlineKeyboardButton("🌍 البلد", callback_data=f"users:country:{uid}:{page}")
-    )
-    kb.row(types.InlineKeyboardButton("🔙", callback_data=f"users:page:{page}"))
-    try:
-        bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
-    except Exception:
-        bot.send_message(c.message.chat.id, txt, reply_markup=kb)
-    bot.answer_callback_query(c.id)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:label:"))
-def cb_user_label(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS:
-        return bot.answer_callback_query(c.id)
-    _,_,uid,page = c.data.split(":")
-    _pending_label[c.from_user.id] = (uid, int(page))
-    bot.answer_callback_query(c.id, "أرسل الاسم الجديد (أو '-' للحذف)")
-    bot.send_message(c.message.chat.id, f"أرسل الاسم الجديد للمستخدم {uid}. اكتب '-' لإزالة الاسم.")
-
-@bot.message_handler(func=lambda m: m.from_user.id in _pending_label)
-def on_admin_label(m: types.Message):
-    uid, page = _pending_label.pop(m.from_user.id)
-    users = load_json("users.json") or {}
-    u = users.setdefault(uid, {})
-    val = (m.text or "").strip()
-    if val == "-" or val == "":
-        u["label"] = None
-        msg = f"تم إزالة الاسم للمستخدم {uid}."
-    else:
-        u["label"] = val[:32]
-        msg = f"تم ضبط الاسم: {uid} — {u['label']}"
-    save_json("users.json", users)
-    bot.reply_to(m, msg)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("users:country:"))
-def cb_user_country(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS:
-        return bot.answer_callback_query(c.id)
-    _,_,uid,page = c.data.split(":")
-    _pending_country[c.from_user.id] = (uid, int(page))
-    bot.answer_callback_query(c.id, "أرسل اسم البلد (أو '-' للحذف)")
-    bot.send_message(c.message.chat.id, f"أرسل اسم البلد للمستخدم {uid}. اكتب '-' لإزالة البلد.")
-
-@bot.message_handler(func=lambda m: m.from_user.id in _pending_country)
-def on_admin_country(m: types.Message):
-    uid, page = _pending_country.pop(m.from_user.id)
-    users = load_json("users.json") or {}
-    u = users.setdefault(uid, {})
-    val = (m.text or "").strip()
-    if val == "-" or val == "":
-        u["country"] = None
-        msg = f"تم إزالة البلد للمستخدم {uid}."
-    else:
-        u["country"] = val[:32]
-        msg = f"تم ضبط البلد للمستخدم {uid}: {u['country']}"
-    save_json("users.json", users)
-    bot.reply_to(m, msg)
-
-
-
-# ---------- Admin: setdaily / cleardaily ----------
-_pending_daily_for = {}  # admin_id -> target_uid
-
-@bot.message_handler(commands=["setdaily"])
-def cmd_setdaily(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2 or not parts[1].isdigit():
-        return bot.reply_to(message, "Usage: /setdaily <user_id>")
-    target = parts[1]
-    _pending_daily_for[message.from_user.id] = target
-    bot.reply_to(message, f"أرسل نص الصفقات اليومية للمستخدم {target}.")
-
-@bot.message_handler(commands=["cleardaily"])
-def cmd_cleardaily(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2 or not parts[1].isdigit():
-        return bot.reply_to(message, "Usage: /cleardaily <user_id>")
-    target = parts[1]
-    users = load_json("users.json") or {}
-    u = users.setdefault(target, {})
-    if "daily" in u: del u["daily"]
-    save_json("users.json", users)
-    bot.reply_to(message, f"تم مسح الصفقات اليومية للمستخدم {target}.")
-
-@bot.message_handler(func=lambda m: m.from_user.id in _pending_daily_for)
-def on_admin_setdaily_text(m: types.Message):
-    target = _pending_daily_for.pop(m.from_user.id)
-    users = load_json("users.json") or {}
-    u = users.setdefault(target, {})
-    u["daily"] = (m.text or "").strip()[:2000]
-    save_json("users.json", users)
-    bot.reply_to(m, f"تم ضبط الصفقات اليومية للمستخدم {target}.")
