@@ -2,6 +2,39 @@
 """
 QL Trading Bot — Monthly subscription only + Players admin + Pro Stats UI (i18n)
 Author: ChatGPT
+import re, time
+
+def _iter_all_users():
+    users = load_json("users") or {}
+    for uid in list(users.keys()):
+        try:
+            yield int(uid)
+        except Exception:
+            continue
+
+def _split_ar_en(raw: str):
+    text = (raw or "").strip()
+    m = re.search(r'أخبار اليوم\s*:?(.*?)(?:\n{2,}|^|\Z)(?:Today\'?s?\s+News\s*:?(.*))?', text, flags=re.S|re.I)
+    if m:
+        ar = (m.group(1) or "").strip()
+        en = (m.group(2) or "").strip()
+        if ar and en: return ar, en
+    m2 = re.search(r'Today\'?s?\s+News\s*:?(.*?)(?:\n{2,}|^|\Z)(?:أخبار اليوم\s*:?(.*))?', text, flags=re.S|re.I)
+    if m2:
+        en = (m2.group(1) or "").strip()
+        ar = (m2.group(2) or "").strip()
+        if ar and en: return ar, en
+    parts = re.split(r'\n\s*\n', text, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[0].strip(), parts[1].strip()
+    raise ValueError("لا يمكن تحديد العربي/الإنجليزي: اكتب العربي ثم سطر فاضي ثم الإنجليزي، أو استخدم العناوين (أخبار اليوم / Today’s News).")
+
+def _format_news_msg(ar_text: str, en_text: str):
+    return ("📰 **أخبار اليوم**\n" + ar_text + "\n\n— — — — —\n\n" + "📰 **Today's News**\n" + en_text)
+
+def _format_updates_msg(ar_text: str, en_text: str):
+    return ("🔔 **تحديثات جديدة**\n" + ar_text + "\n\n— — — — —\n\n" + "🔔 **New Updates**\n" + en_text)
+
 
 Features
 - i18n: ar/en/tr/es/fr
@@ -78,8 +111,6 @@ def update_commands_menu():
     admin_only = [
         types.BotCommand("addbalance", "STAFF: add balance"),
         types.BotCommand("setdaily", "STAFF: set daily"),
-        types.BotCommand("setbalance", "ADMIN: set balance"),
-        types.BotCommand("takebalance", "ADMIN: take balance"),
         types.BotCommand("setdaily_all", "ADMIN: set daily (ALL)"),
         types.BotCommand("cleardaily_all", "ADMIN: clear daily (ALL)"),
         types.BotCommand("cleardaily", "ADMIN: clear daily (user)"),
@@ -90,9 +121,8 @@ def update_commands_menu():
         types.BotCommand("subinfo", "ADMIN: sub info"),
         types.BotCommand("players", "ADMIN: players list"),
         types.BotCommand("pfind", "ADMIN: find player"),
-        types.BotCommand("broadcast", "ADMIN: broadcast"),
-        types.BotCommand("promote", "ADMIN: promote user"),
-        types.BotCommand("demote", "ADMIN: demote user"),
+        types.BotCommand("broadcast", "ADMIN: broadcast (AR/EN)"),
+        types.BotCommand("updateall", "ADMIN: updates (AR/EN)"),
         types.BotCommand("setwebsite", "ADMIN: set website"),
         types.BotCommand("delwebsite", "ADMIN: delete website"),
         types.BotCommand("addwin", "ADMIN: add win"),
@@ -581,47 +611,40 @@ def cmd_lang(m: types.Message):
     bot.reply_to(m, TEXT[get_lang(uid)]["lang_menu_title"], reply_markup=build_lang_kb())
 
 @bot.message_handler(commands=["help"])
+
+@bot.message_handler(commands=["help"])
 def cmd_help(m: types.Message):
     uid = ensure_user(m.chat.id)
-    is_ad = is_admin(uid)
     lang = get_lang(uid)
-    tt = TEXT[lang]
-    lines = [tt["help_title"]]
-    public = [
-        "/start - Main menu",
-        "/id - Show your ID",
-        "/balance - Your balance",
-        "/daily - Daily trade",
-        "/withdraw <amount> - Request withdrawal",
-        "/wlist - My withdrawal requests",
-        "/lang - Language menu",
-        "/mystats - My stats",
-    ]
-    for c in public: lines.append(f"• {c}")
-    if is_ad:
-        admin = [
-            "/players - Browse players",
-            "/pfind <user_id> - Open player by ID",
-            "/genkey <monthly|lifetime> [count]",
-            "/delkey <KEY>",
-            "/gensub <user_id> <monthly|+days> [days]",
-            "/delsub <user_id>",
-            "/setbal <user_id> <amount>",
-            "/addbal <user_id> <amount>",
-            "/takebal <user_id> <amount>",
-            "/setdaily <user_id>",
-            "/cleardaily <user_id>",
-            "/setwebsite <url>",
-            "/delwebsite",
-            "/addwin <user_id> <amount> [note]",
-            "/addloss <user_id> <amount> [note]",
-            "/addtrade <user_id> win|loss <amount> [note]",
-        ]
+    isadm = is_admin(uid)
+    DESCS = {
+        "ar": {"start":"القائمة الرئيسية","help":"قائمة الأوامر","id":"إظهار آيديك","balance":"رصيدك","daily":"صفقة اليوم",
+               "withdraw":"طلب سحب (اكتب المبلغ بعد الأمر)","wlist":"طلبات السحب المعلقة","mystats":"إحصائياتي","mystatus":"حالة الاشتراك","lang":"تغيير اللغة",
+               "addbalance":"STAFF: إضافة رصيد","setdaily":"STAFF: تعيين اليومية","setdaily_all":"ADMIN: تعيين اليومية للجميع","cleardaily_all":"ADMIN: مسح اليومية للجميع",
+               "cleardaily":"ADMIN: مسح اليومية لمستخدم","genkey":"ADMIN: توليد مفاتيح","delkey":"ADMIN: حذف مفتاح","gensub":"ADMIN: منح اشتراك","delsub":"ADMIN: حذف اشتراك",
+               "subinfo":"ADMIN: معلومات الاشتراكات","players":"ADMIN: قائمة اللاعبين","pfind":"ADMIN: ابحث عن لاعب","broadcast":"ADMIN: بث للجميع (AR/EN)","updateall":"ADMIN: تحديثات (AR/EN)",
+               "setwebsite":"ADMIN: تحديد الموقع","delwebsite":"ADMIN: حذف الموقع","addwin":"ADMIN: إضافة ربح","addloss":"ADMIN: إضافة خسارة","addtrade":"ADMIN: إضافة عملية",
+               "clearstats":"ADMIN: مسح إحصائيات مستخدم","clearstats_today":"ADMIN: مسح إحصائيات اليوم","clearstatsall":"ADMIN: مسح الإحصائيات للجميع"},
+        "en": {"start":"Main menu","help":"Command list","id":"Show your ID","balance":"Your balance","daily":"Daily trade",
+               "withdraw":"Withdraw request (amount after command)","wlist":"My withdrawal requests","mystats":"My statistics","mystatus":"Subscription status","lang":"Language",
+               "addbalance":"STAFF: add balance","setdaily":"STAFF: set daily","setdaily_all":"ADMIN: set daily (ALL)","cleardaily_all":"ADMIN: clear daily (ALL)",
+               "cleardaily":"ADMIN: clear daily (user)","genkey":"ADMIN: generate key","delkey":"ADMIN: delete key","gensub":"ADMIN: grant subscription","delsub":"ADMIN: remove subscription",
+               "subinfo":"ADMIN: subscriptions info","players":"ADMIN: players list","pfind":"ADMIN: find player","broadcast":"ADMIN: broadcast (AR/EN)","updateall":"ADMIN: updates (AR/EN)",
+               "setwebsite":"ADMIN: set website","delwebsite":"ADMIN: delete website","addwin":"ADMIN: add win","addloss":"ADMIN: add loss","addtrade":"ADMIN: add trade",
+               "clearstats":"ADMIN: clear stats (user)","clearstats_today":"ADMIN: clear today stats","clearstatsall":"ADMIN: clear stats (ALL)"}
+    }
+    d = DESCS.get(lang, DESCS["en"])
+    user_list = ["start","help","id","balance","daily","withdraw","wlist","mystats","mystatus","lang"]
+    admin_list = ["addbalance","setdaily","setdaily_all","cleardaily_all","cleardaily","genkey","delkey","gensub","delsub","subinfo","players","pfind","broadcast","updateall","setwebsite","delwebsite","addwin","addloss","addtrade","clearstats","clearstats_today","clearstatsall"]
+    title = "🛠 قائمة الأوامر" if lang=="ar" else "🛠 Available commands"
+    lines = [title]
+    for c in user_list: lines.append(f"/{c} — {d.get(c,c)}")
+    if isadm:
         lines.append("")
-        lines.append("<b>Admin</b>:")
-        for c in admin: lines.append(f"• {c}")
+        lines.append("🔐 " + ("أوامر المشرفين:" if lang=="ar" else "Admin commands:"))
+        for c in admin_list: lines.append(f"/{c} — {d.get(c,c)}")
     import html as _h
-    bot.send_message(m.chat.id, _h.escape("\n".join(lines), quote=False))
+    bot.reply_to(m, _h.escape("\n".join(lines), quote=False))
 
 
 @bot.message_handler(commands=["mystatus"])
@@ -781,21 +804,67 @@ def cmd_balance_admin(m: types.Message):
     if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
     parts = (m.text or "").split()
     if len(parts) < 3 or not parts[1].isdigit():
-        return bot.reply_to(m, "Usage: /setbal|/addbal|/takebal <user_id> <amount>")
+        return bot.reply_to(m, "Usage: /addbal <user_id> <amount>")
     target, amt = parts[1], parts[2]
     try: amount = float(amt)
     except Exception: return bot.reply_to(m, "Invalid amount")
     users = load_json("users") or {}; u = users.setdefault(target, {"balance":0, "role":"user", "created_at": _now_str(), "lang":"ar"})
-    if m.text.startswith("/setbal"):
+    if False and m.text.startswith("/setbal"):
         u["balance"] = amount
-    elif m.text.startswith("/addbal"):
+    if m.text.startswith("/addbal"):
         u["balance"] = float(u.get("balance",0)) + amount
-    else: # takebal
-        u["balance"] = max(0.0, float(u.get("balance",0)) - amount)
+    elif m.text.startswith("/takebal"):
+        return bot.reply_to(m, "This command is disabled.")
     save_json("users", users)
     bot.reply_to(m, f"OK. {target} balance = {u['balance']:.2f}$")
     _notify_balance(target)
 
+
+@bot.message_handler(commands=["broadcast"])
+def cmd_broadcast(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return
+    raw = (m.text or "").split("\n", 1)
+    body = raw[1].strip() if len(raw)>1 else ""
+    if not body:
+        return bot.reply_to(m, "صيغة البث:\n/broadcast\nأخبار اليوم:\nالنص العربي…\n\nToday's News:\nEnglish text…")
+    try:
+        ar_text, en_text = _split_ar_en(body)
+    except ValueError as e:
+        return bot.reply_to(m, str(e))
+    msg = _format_news_msg(ar_text, en_text)
+    sent = failed = 0
+    for user_id in _iter_all_users():
+        try:
+            bot.send_message(user_id, msg, parse_mode="Markdown")
+            sent += 1
+            time.sleep(0.05)
+        except Exception:
+            failed += 1
+    bot.reply_to(m, f"تم إرسال أخبار اليوم ✅\nنجاح: {sent} | فشل: {failed}")
+
+@bot.message_handler(commands=["updateall"])
+def cmd_updateall(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return
+    raw = (m.text or "").split("\n", 1)
+    body = raw[1].strip() if len(raw)>1 else ""
+    if not body:
+        return bot.reply_to(m, "صيغة التحديثات:\n/updateall\nالتحديثات بالعربي…\n\nUpdates in English…")
+    try:
+        ar_text, en_text = _split_ar_en(body)
+    except ValueError as e:
+        return bot.reply_to(m, str(e))
+    msg = _format_updates_msg(ar_text, en_text)
+    sent = failed = 0
+    for user_id in _iter_all_users():
+        try:
+            bot.send_message(user_id, msg, parse_mode="Markdown")
+            sent += 1
+            time.sleep(0.05)
+        except Exception:
+            failed += 1
+    bot.reply_to(m, f"تم إرسال التحديثات ✅\nنجاح: {sent} | فشل: {failed}")
 # ---------- Keys / subs admin ----------
 @bot.message_handler(commands=["genkey"])
 def cmd_genkey(m: types.Message):
@@ -1354,7 +1423,7 @@ def cb_wadmin(c: types.CallbackQuery):
     if not req or req.get("status")!="pending": return bot.send_message(c.message.chat.id, "Already processed or not found.")
     if c.data.startswith("wapp_"):
         req["status"]="approved"; _append_withdraw_log({**req, "processed_at": _now_str(), "action":"approved"}); save_json("withdraw_requests", reqs)
-        try: bot.send_message(int(req.get("user_id")), f"✅ تم قبول طلب السحب #{rid} بقيمة {req.get('amount')}$")
+        try: bot.send_message(int(req.get("user_id")), f"✅ تم السحب {req.get('amount')}$ وتم تحويل المبلغ إلى حسابك البنكي.")
         except Exception: pass
         bot.send_message(c.message.chat.id, T(uid,"admin_w_approve", id=rid))
     else:
