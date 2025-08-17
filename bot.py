@@ -65,10 +65,11 @@ if DATABASE_URL:
         from db_kv import init_db, get_json as db_get, set_json as db_set
         init_db()
         USE_DB = True
-        log.info("Using DB storage")
+        log.info("📦 Storage: Database Connected")
     except Exception as e:
         log.error("DB init failed: %s; fallback to JSON files", e)
         USE_DB = False
+        log.info("📦 Storage: JSON fallback")
 
 DATA_FILES = {
     "users": "users.json",
@@ -182,6 +183,26 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "admin_w_title":"🧾 طلبات السحب (قيد الانتظار)","admin_w_none":"لا يوجد طلبات بانتظار الموافقة.","admin_w_item":"#{id} — المستخدم {uid} — {amount}$ — {at}","admin_w_approve":"✅ تمت الموافقة على طلب #{id}.","admin_w_denied":"❌ تم رفض طلب #{id} وتمت إعادة المبلغ.",
 "setwebsite_ok":"✅ تم ضبط رابط الموقع.","setwebsite_usage":"الصيغة: /setwebsite <URL>","delwebsite_ok":"✅ تم حذف رابط الموقع.",
 "players_title":"قائمة اللاعبين:","players_view":"عرض","players_name":"✏️ الاسم","players_country":"🌍 البلد","players_search_btn":"🔎 بحث بالآيدي","players_next":"التالي ➡️","players_prev":"⬅️ السابق","players_search_prompt":"أرسل آيدي اللاعب أو '-' للإلغاء.","players_search_not_found":"الآيدي غير موجود. جرّب رقمًا آخر."
+,
+"bulk_daily_set_ok": "✅ تم ضبط صفقة اليوم لكل المستخدمين."
+,
+"bulk_daily_cleared_ok": "🧹 تم حذف صفقة اليوم من جميع المستخدمين."
+,
+"bulk_trade_added_ok": "✅ تمت إضافة {kind} بقيمة {amount}$ لعدد {n} مستخدم."
+,
+"bulk_stats_cleared_today_ok": "🧹 تم حذف إحصائيات اليوم فقط (عدد سجلات محذوفة ≈ {removed})."
+,
+"bulk_stats_cleared_all_ok": "🧹 تم مسح جميع الإحصائيات لكل المستخدمين."
+,
+"btn_withdraw_custom": "💵 مبلغ مخصص"
+,
+"withdraw_enter_msg": "✍️ أرسل مبلغ السحب (رقم صحيح)."
+,
+"status_title": "📅 حالة اشتراكك"
+,
+"status_active": "⏳ المدة المتبقية: {remain}"
+,
+"status_expired": "⚠️ انتهى اشتراكك."
 },
 "en": {
 "welcome":"👋 Welcome to the trading bot\n\n💰 Your balance: {balance}$\n⏳ Subscription ends in: {remain}\n🆔 Your ID: {user_id}",
@@ -201,6 +222,26 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "admin_w_title":"🧾 Pending withdrawal requests","admin_w_none":"No pending requests.","admin_w_item":"#{id} — user {uid} — {amount}$ — {at}","admin_w_approve":"✅ Request #{id} approved.","admin_w_denied":"❌ Request #{id} denied and amount returned.",
 "setwebsite_ok":"✅ Website URL saved.","setwebsite_usage":"Usage: /setwebsite <URL>","delwebsite_ok":"✅ Website URL cleared.",
 "players_title":"Players list:","players_view":"View","players_name":"✏️ Name","players_country":"🌍 Country","players_search_btn":"🔎 Search by ID","players_next":"Next ➡️","players_prev":"⬅️ Prev","players_search_prompt":"Send player ID or '-' to cancel.","players_search_not_found":"ID not found. Try another one."
+,
+"bulk_daily_set_ok": "✅ Daily trade set for all users."
+,
+"bulk_daily_cleared_ok": "🧹 Daily trade cleared for all users."
+,
+"bulk_trade_added_ok": "✅ Added {kind} of {amount}$ to {n} users."
+,
+"bulk_stats_cleared_today_ok": "🧹 Cleared today’s statistics (≈ {removed} records)."
+,
+"bulk_stats_cleared_all_ok": "🧹 Cleared ALL statistics for all users."
+,
+"btn_withdraw_custom": "💵 Custom amount"
+,
+"withdraw_enter_msg": "✍️ Send the withdrawal amount (integer)."
+,
+"status_title": "📅 Your subscription status"
+,
+"status_active": "⏳ Remaining: {remain}"
+,
+"status_expired": "⚠️ Your subscription has expired."
 },
 "tr": {
 "welcome":"👋 Trading botuna hoş geldin\n\n💰 Bakiyen: {balance}$\n⏳ Abonelik bitimine: {remain}\n🆔 ID: {user_id}",
@@ -216,6 +257,26 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "admin_w_title":"🧾 Bekleyen çekim talepleri","admin_w_none":"Bekleyen talep yok.","admin_w_item":"#{id} — kullanıcı {uid} — {amount}$ — {at}","admin_w_approve":"✅ #{id} onaylandı.","admin_w_denied":"❌ #{id} reddedildi ve iade edildi.",
 "setwebsite_ok":"✅ Web sitesi kaydedildi.","setwebsite_usage":"Kullanım: /setwebsite <URL>","delwebsite_ok":"✅ Website URL temizlendi.",
 "players_title":"Oyuncu listesi:","players_view":"Görüntüle","players_name":"✏️ İsim","players_country":"🌍 Ülke","players_search_btn":"🔎 ID ile ara","players_next":"İleri ➡️","players_prev":"⬅️ Geri","players_search_prompt":"Oyuncu ID'sini gönder ya da '-' yaz.","players_search_not_found":"ID bulunamadı. Başka bir tane deneyin."
+,
+"bulk_daily_set_ok": "✅ Günlük işlem tüm kullanıcılara ayarlandı."
+,
+"bulk_daily_cleared_ok": "🧹 Günlük işlem tüm kullanıcılardan silindi."
+,
+"bulk_trade_added_ok": "✅ {n} kullanıcıya {amount}$ {kind} eklendi."
+,
+"bulk_stats_cleared_today_ok": "🧹 Bugünkü istatistikler temizlendi (≈ {removed})."
+,
+"bulk_stats_cleared_all_ok": "🧹 Tüm kullanıcılar için TÜM istatistikler temizlendi."
+,
+"btn_withdraw_custom": "💵 Özel tutar"
+,
+"withdraw_enter_msg": "✍️ Çekmek istediğin tutarı gönder (tam sayı)."
+,
+"status_title": "📅 Abonelik durumun"
+,
+"status_active": "⏳ Kalan süre: {remain}"
+,
+"status_expired": "⚠️ Aboneliğin süresi doldu."
 },
 "es": {
 "welcome":"👋 Bienvenido al bot de trading\n\n💰 Tu saldo: {balance}$\n⏳ La suscripción termina en: {remain}\n🆔 Tu ID: {user_id}",
@@ -231,6 +292,26 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "admin_w_title":"🧾 Solicitudes de retiro pendientes","admin_w_none":"No hay solicitudes pendientes.","admin_w_item":"#{id} — usuario {uid} — {amount}$ — {at}","admin_w_approve":"✅ Solicitud #{id} aprobada.","admin_w_denied":"❌ Solicitud #{id} rechazada y monto devuelto.",
 "setwebsite_ok":"✅ URL del sitio guardada.","setwebsite_usage":"Uso: /setwebsite <URL>","delwebsite_ok":"✅ URL del sitio borrada.",
 "players_title":"Lista de jugadores:","players_view":"Ver","players_name":"✏️ Nombre","players_country":"🌍 País","players_search_btn":"🔎 Buscar por ID","players_next":"Siguiente ➡️","players_prev":"⬅️ Anterior","players_search_prompt":"Envía el ID del jugador o '-' para cancelar.","players_search_not_found":"ID no encontrado. Prueba otro."
+,
+"bulk_daily_set_ok": "✅ Operación diaria establecida para todos los usuarios."
+,
+"bulk_daily_cleared_ok": "🧹 Operación diaria eliminada para todos los usuarios."
+,
+"bulk_trade_added_ok": "✅ Se añadió {kind} de {amount}$ a {n} usuarios."
+,
+"bulk_stats_cleared_today_ok": "🧹 Se borraron las estadísticas de hoy (≈ {removed})."
+,
+"bulk_stats_cleared_all_ok": "🧹 Se borraron TODAS las estadísticas para todos."
+,
+"btn_withdraw_custom": "💵 Monto personalizado"
+,
+"withdraw_enter_msg": "✍️ Envía el monto a retirar (entero)."
+,
+"status_title": "📅 Estado de tu suscripción"
+,
+"status_active": "⏳ Restante: {remain}"
+,
+"status_expired": "⚠️ Tu suscripción ha expirado."
 },
 "fr": {
 "welcome":"👋 Bienvenue dans le bot de trading\n\n💰 Votre solde : {balance}$\n⏳ L’abonnement se termine dans : {remain}\n🆔 Votre ID : {user_id}",
@@ -246,6 +327,26 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "admin_w_title":"🧾 Demandes de retrait en attente","admin_w_none":"Aucune demande en attente.","admin_w_item":"#{id} — utilisateur {uid} — {amount}$ — {at}","admin_w_approve":"✅ Demande #{id} approuvée.","admin_w_denied":"❌ Demande #{id} refusée et montant remboursé.",
 "setwebsite_ok":"✅ URL du site enregistrée.","setwebsite_usage":"Usage : /setwebsite <URL>","delwebsite_ok":"✅ URL du site supprimée.",
 "players_title":"Liste des joueurs :","players_view":"Voir","players_name":"✏️ Nom","players_country":"🌍 Pays","players_search_btn":"🔎 Rechercher par ID","players_next":"Suivant ➡️","players_prev":"⬅️ Précédent","players_search_prompt":"Envoyez l’ID du joueur ou '-' pour annuler.","players_search_not_found":"ID introuvable. Essayez un autre."
+,
+"bulk_daily_set_ok": "✅ Trade du jour défini pour tous les utilisateurs."
+,
+"bulk_daily_cleared_ok": "🧹 Trade du jour effacé pour tous."
+,
+"bulk_trade_added_ok": "✅ Ajout de {kind} de {amount}$ à {n} utilisateurs."
+,
+"bulk_stats_cleared_today_ok": "🧹 Statistiques du jour effacées (≈ {removed})."
+,
+"bulk_stats_cleared_all_ok": "🧹 TOUTES les statistiques ont été effacées pour tous."
+,
+"btn_withdraw_custom": "💵 Montant personnalisé"
+,
+"withdraw_enter_msg": "✍️ Envoyez le montant à retirer (entier)."
+,
+"status_title": "📅 État de votre abonnement"
+,
+"status_active": "⏳ Restant : {remain}"
+,
+"status_expired": "⚠️ Votre abonnement a expiré."
 }
 }
 
@@ -451,6 +552,18 @@ def cmd_help(m: types.Message):
         for c in admin: lines.append(f"• {c}")
     bot.send_message(m.chat.id, "\n".join(lines))
 
+
+@bot.message_handler(commands=["mystatus"])
+def cmd_mystatus(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    # No require_active_or_ask: show status even if expired
+    remain = sub_remaining_str(uid)
+    lang = get_lang(uid); tt = TEXT[lang]
+    title = tt.get("status_title","Status")
+    if remain == "0s":
+        return bot.reply_to(m, tt.get("status_expired","Expired."))
+    return bot.reply_to(m, tt.get("status_active","Remaining: {remain}").format(remain=remain))
+
 @bot.message_handler(commands=["id"])
 def cmd_id(m: types.Message):
     uid = ensure_user(m.chat.id)
@@ -488,6 +601,97 @@ def cmd_mystats(m: types.Message):
     if not require_active_or_ask(m.chat.id): return
     header = _stats_build_text(uid, uid)
     bot.send_message(m.chat.id, header, reply_markup=_stats_kb(uid,"main"))
+
+
+# ---------- Bulk admin ops: daily & stats (ALL users) ----------
+@bot.message_handler(commands=["setdaily_all"])
+def cmd_setdaily_all(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid, "admin_only"))
+    parts = (m.text or "").split(maxsplit=1)
+    if len(parts)<2 or not parts[1].strip():
+        return bot.reply_to(m, "Usage: /setdaily_all <text>")
+    text = parts[1].strip()[:2000]
+    users = load_json("users") or {}
+    for k in users.keys():
+        u = users.setdefault(k, {}); u["daily"] = text
+    save_json("users", users)
+    bot.reply_to(m, T(uid, "bulk_daily_set_ok"))
+
+@bot.message_handler(commands=["cleardaily_all"])
+def cmd_cleardaily_all(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid, "admin_only"))
+    users = load_json("users") or {}
+    changed = 0
+    for k in users.keys():
+        u = users.setdefault(k, {})
+        if "daily" in u:
+            u.pop("daily", None); changed += 1
+    save_json("users", users)
+    bot.reply_to(m, T(uid, "bulk_daily_cleared_ok"))
+
+def _recompute_stats_totals(u_hist: list) -> dict:
+    win_sum = 0.0; loss_sum = 0.0
+    for r in u_hist:
+        kind = (r or {}).get("kind")
+        amt = r.get("amount",0)
+        try: amt_f = float(amt)
+        except Exception: amt_f = 0.0
+        if kind=="win": win_sum += amt_f
+        elif kind=="loss": loss_sum += amt_f
+    return {"total_win": win_sum, "total_loss": loss_sum}
+
+@bot.message_handler(commands=["addtrade_all"])
+def cmd_addtrade_all(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid, "admin_only"))
+    parts = (m.text or "").split(maxsplit=3)
+    if len(parts)<3 or parts[1] not in ("win","loss"):
+        return bot.reply_to(m, "Usage: /addtrade_all win|loss <amount> [note]")
+    kind = parts[1]
+    try: amount = float(parts[2])
+    except Exception: return bot.reply_to(m, "Invalid amount")
+    note = parts[3] if len(parts)>3 else ""
+    users = load_json("users") or {}
+    n=0
+    for k in users.keys():
+        _add_trade_record(k, kind, amount, note)
+        n += 1
+    bot.reply_to(m, T(uid, "bulk_trade_added_ok").format(kind=kind, amount=amount, n=n))
+
+@bot.message_handler(commands=["clearstats_all"])
+def cmd_clearstats_all(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid, "admin_only"))
+    parts = (m.text or "").split()
+    scope = parts[1].lower() if len(parts)>1 else "today"
+    if scope not in ("today","all"):
+        return bot.reply_to(m, "Usage: /clearstats_all [today|all]")
+    stats = _get_stats()
+    removed = 0
+    if scope=="all":
+        for uid_k in list(stats.keys()):
+            stats[uid_k] = {"total_win":0.0,"total_loss":0.0,"history":[]}
+        _save_stats(stats)
+        return bot.reply_to(m, T(uid, "bulk_stats_cleared_all_ok"))
+    # today only (UTC)
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    for uid_k,u in list(stats.items()):
+        hist = (u or {}).get("history", [])[:]
+        new_hist = []
+        for r in hist:
+            ts = (r or {}).get("ts","")
+            if ts.startswith(today_str):
+                removed += 1
+                continue
+            new_hist.append(r)
+        stats[uid_k]["history"] = new_hist
+        totals = _recompute_stats_totals(new_hist)
+        stats[uid_k]["total_win"] = totals["total_win"]
+        stats[uid_k]["total_loss"] = totals["total_loss"]
+    _save_stats(stats)
+    bot.reply_to(m, T(uid, "bulk_stats_cleared_today_ok").format(removed=removed))
 
 # ---------- Balance admin ----------
 def _notify_balance(uid_target: str):
@@ -616,6 +820,7 @@ def open_withdraw_menu(chat_id: int, uid: str):
     mm = types.InlineKeyboardMarkup()
     for amount in [10,20,30,50,100]:
         mm.add(types.InlineKeyboardButton(f"{amount}$", callback_data=f"withdraw_{amount}"))
+    mm.add(types.InlineKeyboardButton(tt["btn_withdraw_custom"], callback_data="withdraw_custom"))
     mm.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
     bot.send_message(chat_id, tt["choose_withdraw_amount"], reply_markup=mm)
 
@@ -1018,6 +1223,28 @@ def cb_wmenu(c: types.CallbackQuery):
     uid = ensure_user(c.from_user.id)
     open_withdraw_menu(c.message.chat.id, uid)
 
+
+_pending_withdraw = set()
+
+@bot.callback_query_handler(func=lambda c: c.data=="withdraw_custom")
+def cb_withdraw_custom(c: types.CallbackQuery):
+    uid = ensure_user(c.from_user.id)
+    lang = get_lang(uid); tt = TEXT[lang]
+    _pending_withdraw.add(uid)
+    try: bot.answer_callback_query(c.id)
+    except Exception: pass
+    bot.send_message(c.message.chat.id, tt["withdraw_enter_msg"])
+
+@bot.message_handler(func=lambda m: str(m.from_user.id) in _pending_withdraw)
+def on_custom_withdraw_amount(m: types.Message):
+    uid = str(m.from_user.id)
+    _pending_withdraw.discard(uid)
+    try:
+        amount = int((m.text or "").strip())
+    except Exception:
+        return bot.reply_to(m, TEXT[get_lang(uid)]["withdraw_invalid"])
+    return create_withdraw_request(m.chat.id, uid, amount)
+
 @bot.callback_query_handler(func=lambda c: c.data=="withdraw_status")
 def cb_wstatus(c: types.CallbackQuery):
     uid = ensure_user(c.from_user.id); tt = TEXT[get_lang(uid)]
@@ -1069,7 +1296,6 @@ def cb_cancel_withdraw(c: types.CallbackQuery):
 def cb_deposit(c: types.CallbackQuery):
     uid=ensure_user(c.from_user.id); tt=TEXT[get_lang(uid)]
     kb=types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(tt["deposit_cash"], callback_data="dep_cash"))
     kb.add(types.InlineKeyboardButton(tt["deposit_paypal"], callback_data="dep_paypal"))
     kb.add(types.InlineKeyboardButton(tt["deposit_bank"], callback_data="dep_bank"))
     kb.add(types.InlineKeyboardButton(tt["deposit_mc"], callback_data="dep_mc"))
