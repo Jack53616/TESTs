@@ -55,6 +55,61 @@ if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML", threaded=True)
+
+def update_commands_menu():
+    # common user commands
+    common = [
+        types.BotCommand("start", "Main menu"),
+        types.BotCommand("help", "Command list"),
+        types.BotCommand("id", "Show your ID"),
+        types.BotCommand("balance", "Your balance"),
+        types.BotCommand("daily", "Daily trade"),
+        types.BotCommand("withdraw", "Withdraw request"),
+        types.BotCommand("wlist", "My withdrawal requests"),
+        types.BotCommand("mystats", "My statistics"),
+        types.BotCommand("mystatus", "Subscription status"),
+        types.BotCommand("lang", "Language"),
+    ]
+    try:
+        bot.set_my_commands(common)
+    except Exception:
+        pass
+
+    admin_only = [
+        types.BotCommand("addbalance", "STAFF: add balance"),
+        types.BotCommand("setdaily", "STAFF: set daily"),
+        types.BotCommand("setbalance", "ADMIN: set balance"),
+        types.BotCommand("takebalance", "ADMIN: take balance"),
+        types.BotCommand("setdaily_all", "ADMIN: set daily (ALL)"),
+        types.BotCommand("cleardaily_all", "ADMIN: clear daily (ALL)"),
+        types.BotCommand("cleardaily", "ADMIN: clear daily (user)"),
+        types.BotCommand("genkey", "ADMIN: generate key"),
+        types.BotCommand("delkey", "ADMIN: delete key"),
+        types.BotCommand("gensub", "ADMIN: give sub"),
+        types.BotCommand("delsub", "ADMIN: remove sub"),
+        types.BotCommand("subinfo", "ADMIN: sub info"),
+        types.BotCommand("players", "ADMIN: players list"),
+        types.BotCommand("pfind", "ADMIN: find player"),
+        types.BotCommand("broadcast", "ADMIN: broadcast"),
+        types.BotCommand("promote", "ADMIN: promote user"),
+        types.BotCommand("demote", "ADMIN: demote user"),
+        types.BotCommand("setwebsite", "ADMIN: set website"),
+        types.BotCommand("delwebsite", "ADMIN: delete website"),
+        types.BotCommand("addwin", "ADMIN: add win"),
+        types.BotCommand("addloss", "ADMIN: add loss"),
+        types.BotCommand("addtrade", "ADMIN: add trade"),
+        types.BotCommand("clearstats", "ADMIN: clear stats (user)"),
+        types.BotCommand("clearstats_today", "ADMIN: clear today stats"),
+        types.BotCommand("clearstatsall", "ADMIN: clear stats (ALL)"),
+    ]
+    # apply per-admin scope
+    for adm in ADMIN_IDS:
+        try:
+            scope = types.BotCommandScopeChat(chat_id=int(adm))
+            bot.set_my_commands(common + admin_only, scope=scope)
+        except Exception:
+            pass
+update_commands_menu()
 app = Flask(__name__)
 
 # ---------- Storage ----------
@@ -565,7 +620,8 @@ def cmd_help(m: types.Message):
         lines.append("")
         lines.append("<b>Admin</b>:")
         for c in admin: lines.append(f"• {c}")
-    bot.send_message(m.chat.id, "\n".join(lines))
+    import html as _h
+    bot.send_message(m.chat.id, _h.escape("\n".join(lines), quote=False))
 
 
 @bot.message_handler(commands=["mystatus"])
