@@ -472,7 +472,7 @@ def main_menu(uid: str) -> types.InlineKeyboardMarkup:
     m.add(types.InlineKeyboardButton(tt["btn_daily"], callback_data="daily_trade"),
           types.InlineKeyboardButton(tt["btn_withdraw"], callback_data="withdraw_menu"))
     m.add(types.InlineKeyboardButton(tt["btn_wstatus"], callback_data="withdraw_status"),
-          types.InlineKeyboardButton(tt["btn_stats"], callback_data="stats"))
+          types.InlineKeyboardButton(tt["btn_stats"], callback_data="stats:main"))
     m.add(types.InlineKeyboardButton(tt["btn_deposit"], callback_data="deposit"),
           types.InlineKeyboardButton(tt["btn_lang"], callback_data="lang_menu"))
     m.add(types.InlineKeyboardButton(tt["btn_website"], callback_data="website"),
@@ -1369,7 +1369,8 @@ _pending_daily_for: Dict[int, str] = {}
 
 @bot.message_handler(commands=["setdaily"])
 def cmd_setdaily(m: types.Message):
-    if m.from_user.id not in ADMIN_IDS: return
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
     parts = (m.text or "").split()
     if len(parts)<2 or not parts[1].isdigit(): return bot.reply_to(m, "Usage: /setdaily <user_id>")
     target = parts[1]; _pending_daily_for[m.from_user.id]=target
@@ -1377,7 +1378,8 @@ def cmd_setdaily(m: types.Message):
 
 @bot.message_handler(commands=["cleardaily"])
 def cmd_cleardaily(m: types.Message):
-    if m.from_user.id not in ADMIN_IDS: return
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
     parts = (m.text or "").split()
     if len(parts)<2 or not parts[1].isdigit(): return bot.reply_to(m, "Usage: /cleardaily <user_id>")
     target = parts[1]; users = load_json("users") or {}; u=users.setdefault(target, {}); u.pop("daily", None); save_json("users", users)
