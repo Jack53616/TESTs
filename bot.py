@@ -1568,20 +1568,20 @@ def cb_go_back(c: types.CallbackQuery):
 # ---------- Admin: setdaily/cleardaily ----------
 _pending_daily_for: Dict[int, str] = {}
 
+
 @bot.message_handler(commands=["setdaily"])
-def cmd_setdaily(m: types.Message):
-    uid = ensure_user(m.chat.id)
-    if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
-    parts = (m.text or "").split(maxsplit=2)
-    if len(parts) >= 3 and parts[1].isdigit():
-        target = parts[1]; textv = parts[2].strip()
-        users = load_json("users") or {}; u = users.setdefault(target, {}); u["daily"] = textv[:2000]; save_json("users", users)
-        return bot.reply_to(m, f"Daily set for {target}")
-    # fallback to old flow:
-    parts = (m.text or "").split()
-    if len(parts)<2 or not parts[1].isdigit(): return bot.reply_to(m, "/setdaily id text - setdailyall text")
-    target = parts[1]; _pending_daily_for[m.from_user.id]=target
-    bot.reply_to(m, f"أرسل نص الصفقات اليومية للمستخدم {target}.")
+@admin_only_guard
+def cmd_setdaily(m):
+    # Supports: /setdaily <user_id> <text>
+    txt = (m.text or "").strip()
+    m1 = re.match(r"^/setdaily\s+(\d+)\s+(.+)$", txt, flags=re.S)
+    if not m1:
+        return bot.reply_to(m, "/setdaily id text - setdailyall text")
+    uid = int(m1.group(1))
+    dtext = m1.group(2).strip()
+    set_user_daily(uid, dtext)
+    bot.reply_to(m, f"Daily set for {uid}")
+
 
 @bot.message_handler(commands=["cleardaily"])
 def cmd_cleardaily(m: types.Message):
@@ -1635,10 +1635,19 @@ else:
     app.run(host="0.0.0.0", port=PORT)
 
 
-@bot.message_handler(commands=["setdailyall"])
-def cmd_setdailyall_alias(m: types.Message):
-    return cmd_setdaily_all(m)
 
+@bot.message_handler(commands=["setdailyall"])
+@admin_only_guard
+def cmd_setdailyall(m):
+    txt = (m.text or "").strip()
+    m1 = re.match(r"^/setdailyall\s+(.+)$", txt, flags=re.S)
+    if not m1:
+        return bot.reply_to(m, "/setdaily id text - setdailyall text")
+    dtext = m1.group(1).strip()
+    cnt = 0
+    for uid in iter_all_users():
+        set_user_daily(uid, dtext); cnt += 1
+    bot.reply_to(m, f"Daily set for ALL ({cnt})")
 
 
 @bot.message_handler(commands=["update"])
