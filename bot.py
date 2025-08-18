@@ -3,6 +3,48 @@
 QL Trading Bot — Monthly subscription only + Players admin + Pro Stats UI (i18n)
 Author: ChatGPT
 import re, time
+import warnings
+ADMIN_STATES = {}  # {admin_id: (state, payload)}
+
+# ---- Admin guard (injected) ----
+try:
+    ADMINS
+except NameError:
+    ADMINS = set()  # TODO: fill admin IDs, e.g., {123456789}
+
+def is_admin(uid) -> bool:
+    try:
+        return int(uid) in ADMINS or str(uid) in ADMINS
+    except Exception:
+        return False
+
+def admin_only_guard(func):
+    def wrapper(m_or_c, *args, **kwargs):
+        # support Message or CallbackQuery
+        sender = None
+        try:
+            sender = m_or_c.from_user.id
+        except Exception:
+            try:
+                sender = m_or_c.message.chat.id
+            except Exception:
+                sender = None
+        if not sender or not is_admin(sender):
+            try:
+                # For callbacks reply via alert; for messages reply_to
+                if hasattr(m_or_c, 'id') and hasattr(m_or_c, 'data'):
+                    try:
+                        bot.answer_callback_query(m_or_c.id, 'Admins only.', show_alert=True)
+                    except Exception:
+                        pass
+                else:
+                    bot.reply_to(m_or_c, 'Admins only.')
+            except Exception:
+                pass
+            return
+        return func(m_or_c, *args, **kwargs)
+    return wrapper
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 def _iter_all_users():
     users = load_json("users") or {}
@@ -883,28 +925,29 @@ def cmd_balance_admin(m: types.Message):
     _notify_balance(target)
 
 
+
 @bot.message_handler(commands=["broadcast"])
-def cmd_broadcast(m: types.Message):
-    uid = ensure_user(m.chat.id)
-    if not is_admin(uid): return
-    raw = (m.text or "").split("\n", 1)
-    body = raw[1].strip() if len(raw)>1 else ""
-    if not body:
-        return bot.reply_to(m, "صيغة البث:\n/broadcast\nأخبار اليوم:\nالنص العربي…\n\nToday's News:\nEnglish text…")
+@admin_only_guard
+def cmd_broadcast(m):
+    # If no payload -> expect reply text or enter preview-state
+    parts = (m.text or "").split("\n", 1)
+    payload = parts[1] if len(parts) > 1 else ""
+    if not payload.strip() and m.reply_to_message and (m.reply_to_message.text or "").strip():
+        payload = m.reply_to_message.text
+    if not payload.strip():
+        return bot.reply_to(m, "ارسل رسالة البث بعد الأمر أو بالرد على الرسالة.\nSend the broadcast text after the command or reply to a message.")
     try:
-        ar_text, en_text = _split_ar_en(body)
-    except ValueError as e:
-        return bot.reply_to(m, str(e))
-    msg = _format_news_msg(ar_text, en_text)
-    sent = failed = 0
-    for user_id in _iter_all_users():
-        try:
-            bot.send_message(user_id, msg, parse_mode="Markdown")
-            sent += 1
-            time.sleep(0.05)
-        except Exception:
-            failed += 1
-    bot.reply_to(m, f"تم إرسال أخبار اليوم ✅\nنجاح: {sent} | فشل: {failed}")
+        ar, en = _split_ar_en(payload)
+    except Exception:
+        ar = en = payload.strip()
+    preview = _format_news_msg(ar, en)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🚀 Send", callback_data="bc:send"),
+           types.InlineKeyboardButton("✖️ Cancel", callback_data="bc:cancel"))
+    ADMIN_STATES[m.from_user.id] = ("bc_preview", (ar, en))
+    bot.send_message(m.chat.id, "معاينة البث / Preview:", reply_markup=None)
+    bot.send_message(m.chat.id, preview, reply_markup=kb, parse_mode=None)
+
 
 @bot.message_handler(commands=["updateall"])
 def cmd_updateall(m: types.Message):
@@ -1650,29 +1693,58 @@ def cmd_setdailyall(m):
     bot.reply_to(m, f"Daily set for ALL ({cnt})")
 
 
+
 @bot.message_handler(commands=["update"])
 @admin_only_guard
 def cmd_update(m):
-    # Admin updates push. Same parsing as broadcast; different title.
-    body = (m.text or "").split("\n", 1)
-    payload = body[1] if len(body) > 1 else ""
+    parts = (m.text or "").split("\n", 1)
+    payload = parts[1] if len(parts) > 1 else ""
     if not payload.strip() and m.reply_to_message and (m.reply_to_message.text or "").strip():
         payload = m.reply_to_message.text
-
     if not payload.strip():
         return bot.reply_to(m, "ارسل نص التحديث بعد الأمر أو بالرد على الرسالة.\nSend the update text after the command or reply to a message.")
-
     try:
         ar, en = _split_ar_en(payload)
     except Exception:
         ar = en = payload.strip()
+    preview = _format_updates_msg(ar, en)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🚀 Send", callback_data="up:send"),
+           types.InlineKeyboardButton("✖️ Cancel", callback_data="up:cancel"))
+    ADMIN_STATES[m.from_user.id] = ("up_preview", (ar, en))
+    bot.send_message(m.chat.id, "معاينة التحديث / Preview:", reply_markup=None)
+    bot.send_message(m.chat.id, preview, reply_markup=kb, parse_mode=None)
 
+
+
+@bot.callback_query_handler(func=lambda c: c.data in ("bc:send","bc:cancel","up:send","up:cancel"))
+@admin_only_guard
+def cb_broadcast_preview(c):
+    state = ADMIN_STATES.get(c.from_user.id)
+    if not state:
+        try: bot.answer_callback_query(c.id, "No preview pending."); 
+        except: pass
+        return
+    mode, payload = state
+    if c.data.endswith(":cancel"):
+        ADMIN_STATES.pop(c.from_user.id, None)
+        try: bot.answer_callback_query(c.id, "Canceled."); 
+        except: pass
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+        return
+    # send
+    ar, en = payload
     sent = 0
     for uid in iter_all_users():
         try:
-            safe_send(uid, _format_updates_msg(ar, en))
+            msg = _format_news_msg(ar, en) if mode.startswith("bc") else _format_updates_msg(ar, en)
+            safe_send(uid, msg)
             sent += 1
         except Exception:
             continue
-
-    bot.reply_to(m, f"✅ Update pushed to {sent} users.")
+    ADMIN_STATES.pop(c.from_user.id, None)
+    try: bot.answer_callback_query(c.id, f"Sent to {sent}."); 
+    except: pass
+    try: bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+    except: pass
+    bot.send_message(c.message.chat.id, f"✅ Done. Sent to {sent} users.")
