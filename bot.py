@@ -12,6 +12,24 @@ def _iter_all_users():
         except Exception:
             continue
 
+
+# ---- Broadcast utilities (injected) ----
+def iter_all_users():
+    try:
+        users = load_json("users") or {}
+    except Exception:
+        users = {}
+    for uid in list(users.keys()):
+        try:
+            yield int(uid)
+        except Exception:
+            continue
+
+def safe_send(chat_id, content, reply_markup=None, parse_mode=None):
+    try:
+        return bot.send_message(chat_id, content, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        return None
 def _split_ar_en(raw: str):
     text = (raw or "").strip()
     m = re.search(r'أخبار اليوم\s*:?(.*?)(?:\n{2,}|^|\Z)(?:Today\'?s?\s+News\s*:?(.*))?', text, flags=re.S|re.I)
@@ -109,28 +127,19 @@ def update_commands_menu():
         pass
 
     admin_only = [
-        types.BotCommand("addbalance", "STAFF: add balance"),
-        types.BotCommand("setdaily", "STAFF: set daily"),
-        types.BotCommand("setdaily_all", "ADMIN: set daily (ALL)"),
-        types.BotCommand("cleardaily_all", "ADMIN: clear daily (ALL)"),
-        types.BotCommand("cleardaily", "ADMIN: clear daily (user)"),
+        types.BotCommand("broadcast", "ADMIN: broadcast"),
+        types.BotCommand("update", "ADMIN: update"),
         types.BotCommand("genkey", "ADMIN: generate key"),
         types.BotCommand("delkey", "ADMIN: delete key"),
-        types.BotCommand("gensub", "ADMIN: give sub"),
         types.BotCommand("delsub", "ADMIN: remove sub"),
-        types.BotCommand("subinfo", "ADMIN: sub info"),
-        types.BotCommand("players", "ADMIN: players list"),
-        types.BotCommand("pfind", "ADMIN: find player"),
-        types.BotCommand("broadcast", "ADMIN: broadcast (AR/EN)"),
-        types.BotCommand("updateall", "ADMIN: updates (AR/EN)"),
-        types.BotCommand("setwebsite", "ADMIN: set website"),
-        types.BotCommand("delwebsite", "ADMIN: delete website"),
-        types.BotCommand("addwin", "ADMIN: add win"),
-        types.BotCommand("addloss", "ADMIN: add loss"),
-        types.BotCommand("addtrade", "ADMIN: add trade"),
-        types.BotCommand("clearstats", "ADMIN: clear stats (user)"),
-        types.BotCommand("clearstats_today", "ADMIN: clear today stats"),
-        types.BotCommand("clearstatsall", "ADMIN: clear stats (ALL)"),
+        types.BotCommand("subinfo", "ADMIN: subscription info"),
+        types.BotCommand("addbal", "ADMIN: add balance"),
+        types.BotCommand("setbal", "ADMIN: set balance"),
+        types.BotCommand("takebal", "ADMIN: take balance"),
+        types.BotCommand("setdaily", "ADMIN: set daily for user"),
+        types.BotCommand("setdailyall", "ADMIN: set daily for ALL"),
+        types.BotCommand("wlist", "ADMIN: withdraw requests"),
+        types.BotCommand("players", "ADMIN: players browser"),
     ]
     # apply per-admin scope
     for adm in ADMIN_IDS:
@@ -635,7 +644,7 @@ def cmd_help(m: types.Message):
     }
     d = DESCS.get(lang, DESCS["en"])
     user_list = ["start","help","id","balance","daily","withdraw","wlist","mystats","mystatus","lang"]
-    admin_list = ["addbalance","setdaily","setdaily_all","cleardaily_all","cleardaily","genkey","delkey","gensub","delsub","subinfo","players","pfind","broadcast","updateall","setwebsite","delwebsite","addwin","addloss","addtrade","clearstats","clearstats_today","clearstatsall"]
+    admin_list = ["genkey","delkey","delsub","subinfo","addbal","setbal","takebal","setdaily","setdailyall","wlist","players","broadcast","update"]
     title = "🛠 قائمة الأوامر" if lang=="ar" else "🛠 Available commands"
     lines = [title]
     for c in user_list: lines.append(f"/{c} — {d.get(c,c)}")
@@ -648,6 +657,60 @@ def cmd_help(m: types.Message):
 
 
 @bot.message_handler(commands=["mystatus"])
+
+@bot.message_handler(commands=["addbal"])
+def cmd_addbal(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
+    parts = (m.text or "").split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return bot.reply_to(m, "Usage: /addbal <user_id> <amount>")
+    target = parts[1]
+    try: amount = float(parts[2])
+    except Exception: return bot.reply_to(m, "Usage: /addbal <user_id> <amount>")
+    users = load_json("users") or {}; u = users.setdefault(target, {"balance":0})
+    u["balance"] = float(u.get("balance",0)) + amount
+    save_json("users", users)
+    # notify target
+    try:
+        bot.send_message(int(target), "✅ تم ربط حسابك التداول بالبوت وتم إضافة الرصيد.\n\n✅ Your trading account has been linked to the bot and balance was added.")
+    except Exception: pass
+    return bot.reply_to(m, f"Done. User {target} +{amount}")
+
+@bot.message_handler(commands=["setbal"])
+def cmd_setbal(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
+    parts = (m.text or "").split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return bot.reply_to(m, "Usage: /setbal <user_id> <amount>")
+    target = parts[1]
+    try: amount = float(parts[2])
+    except Exception: return bot.reply_to(m, "Usage: /setbal <user_id> <amount>")
+    users = load_json("users") or {}; u = users.setdefault(target, {"balance":0})
+    u["balance"] = amount
+    save_json("users", users)
+    try: bot.send_message(int(target), f"تم ضبط رصيدك إلى {amount}$")
+    except Exception: pass
+    return bot.reply_to(m, f"OK. balance of {target} = {amount}")
+
+@bot.message_handler(commands=["takebal"])
+def cmd_takebal(m: types.Message):
+    uid = ensure_user(m.chat.id)
+    if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
+    parts = (m.text or "").split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return bot.reply_to(m, "Usage: /takebal <user_id> <amount>")
+    target = parts[1]
+    try: amount = float(parts[2])
+    except Exception: return bot.reply_to(m, "Usage: /takebal <user_id> <amount>")
+    users = load_json("users") or {}; u = users.setdefault(target, {"balance":0})
+    u["balance"] = float(u.get("balance",0)) - amount
+    save_json("users", users)
+    try: bot.send_message(int(target), f"تم خصم {amount}$ من رصيدك.")
+    except Exception: pass
+    return bot.reply_to(m, f"OK. User {target} -{amount}")
+
 def cmd_mystatus(m: types.Message):
     uid = ensure_user(m.chat.id)
     # No require_active_or_ask: show status even if expired
@@ -964,6 +1027,7 @@ def open_withdraw_menu(chat_id: int, uid: str):
     mm.add(types.InlineKeyboardButton(tt["back_btn"], callback_data="go_back"))
     bot.send_message(chat_id, tt["choose_withdraw_amount"], reply_markup=mm)
 
+
 def create_withdraw_request(chat_id: int, uid: str, amount: int):
     if amount<=0: return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_invalid"])
     users = load_json("users") or {}
@@ -975,6 +1039,18 @@ def create_withdraw_request(chat_id: int, uid: str, amount: int):
     rid = str(len(reqs)+1)
     reqs[rid] = {"user_id": uid, "amount": amount, "status":"pending", "created_at": _now_str()}
     save_json("withdraw_requests", reqs)
+    # notify admins with Approve/Deny
+    try:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"wapp_{rid}"),
+               types.InlineKeyboardButton("❌ Deny", callback_data=f"wden_{rid}"))
+        for admin_id in ADMIN_IDS:
+            try:
+                bot.send_message(int(admin_id), f"💸 طلب سحب جديد من {uid} بمبلغ {amount}$ (#{rid})", reply_markup=kb)
+            except Exception:
+                pass
+    except Exception as e:
+        log.error("notify admin failed: %s", e)
     return bot.send_message(chat_id, TEXT[get_lang(uid)]["withdraw_created"].format(req_id=rid, amount=amount))
 
 # ---------- Players (admin) ----------
@@ -1496,8 +1572,14 @@ _pending_daily_for: Dict[int, str] = {}
 def cmd_setdaily(m: types.Message):
     uid = ensure_user(m.chat.id)
     if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
+    parts = (m.text or "").split(maxsplit=2)
+    if len(parts) >= 3 and parts[1].isdigit():
+        target = parts[1]; textv = parts[2].strip()
+        users = load_json("users") or {}; u = users.setdefault(target, {}); u["daily"] = textv[:2000]; save_json("users", users)
+        return bot.reply_to(m, f"Daily set for {target}")
+    # fallback to old flow:
     parts = (m.text or "").split()
-    if len(parts)<2 or not parts[1].isdigit(): return bot.reply_to(m, "Usage: /setdaily <user_id>")
+    if len(parts)<2 or not parts[1].isdigit(): return bot.reply_to(m, "/setdaily id text - setdailyall text")
     target = parts[1]; _pending_daily_for[m.from_user.id]=target
     bot.reply_to(m, f"أرسل نص الصفقات اليومية للمستخدم {target}.")
 
@@ -1551,3 +1633,37 @@ if WEBHOOK_URL:
 else:
     Thread(target=start_polling, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
+
+
+@bot.message_handler(commands=["setdailyall"])
+def cmd_setdailyall_alias(m: types.Message):
+    return cmd_setdaily_all(m)
+
+
+
+@bot.message_handler(commands=["update"])
+@admin_only_guard
+def cmd_update(m):
+    # Admin updates push. Same parsing as broadcast; different title.
+    body = (m.text or "").split("\n", 1)
+    payload = body[1] if len(body) > 1 else ""
+    if not payload.strip() and m.reply_to_message and (m.reply_to_message.text or "").strip():
+        payload = m.reply_to_message.text
+
+    if not payload.strip():
+        return bot.reply_to(m, "ارسل نص التحديث بعد الأمر أو بالرد على الرسالة.\nSend the update text after the command or reply to a message.")
+
+    try:
+        ar, en = _split_ar_en(payload)
+    except Exception:
+        ar = en = payload.strip()
+
+    sent = 0
+    for uid in iter_all_users():
+        try:
+            safe_send(uid, _format_updates_msg(ar, en))
+            sent += 1
+        except Exception:
+            continue
+
+    bot.reply_to(m, f"✅ Update pushed to {sent} users.")
