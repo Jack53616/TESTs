@@ -2,6 +2,7 @@
 """
 QL Trading Bot — Monthly subscription only + Players admin + Pro Stats UI (i18n)
 Author: ChatGPT
+"""
 import re, time
 import warnings
 ADMIN_STATES = {}  # {admin_id: (state, payload)}
@@ -95,7 +96,7 @@ def _format_news_msg(ar_text: str, en_text: str):
 def _format_updates_msg(ar_text: str, en_text: str):
     return ("🔔 **تحديثات جديدة**\n" + ar_text + "\n\n— — — — —\n\n" + "🔔 **New Updates**\n" + en_text)
 
-
+"""
 Features
 - i18n: ar/en/tr/es/fr
 - Subscription: monthly (keys) + lifetime/manual via /gensub
