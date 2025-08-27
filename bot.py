@@ -945,24 +945,70 @@ def cmd_balance_admin(m: types.Message):
 @bot.message_handler(commands=["broadcast"])
 @admin_only_guard
 def cmd_broadcast(m):
-    # If no payload -> expect reply text or enter preview-state
-    parts = (m.text or "").split("\n", 1)
-    payload = parts[1] if len(parts) > 1 else ""
-    if not payload.strip() and m.reply_to_message and (m.reply_to_message.text or "").strip():
-        payload = m.reply_to_message.text
-    if not payload.strip():
-        return bot.reply_to(m, "ارسل رسالة البث بعد الأمر أو بالرد على الرسالة.\nSend the broadcast text after the command or reply to a message.")
+    payload = (m.text or "").split(maxsplit=1)
+    body = payload[1].strip() if len(payload)>1 else ""
+    if not body and m.reply_to_message:
+        body = (m.reply_to_message.text or "").strip()
+    if not body:
+        return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو ردّ على رسالة.")
+    header = "📰 خبار جديد - Breaking News"
+    ok=0; fail=0
+    for uid in iter_all_user_ids():
+        try:
+            bot.send_message(uid, f"{header}\n---------------------------\n{body}")
+            ok+=1
+        except Exception:
+            fail+=1
+    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
+
+
+@bot.message_handler(commands=["addmoney"])
+@admin_only_guard
+def cmd_addmoney(m: types.Message):
+    parts = (m.text or "").split(maxsplit=3)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return bot.reply_to(m, "Usage: /addmoney <user_id> <amount> [reason]")
+    target = parts[1]
     try:
-        ar, en = _split_ar_en(payload)
+        amt = float(parts[2])
     except Exception:
-        ar = en = payload.strip()
-    preview = _format_news_msg(ar, en)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Send", callback_data="bc:send"),
-           types.InlineKeyboardButton("✖️ Cancel", callback_data="bc:cancel"))
-    ADMIN_STATES[m.from_user.id] = ("bc_preview", (ar, en))
-    bot.send_message(m.chat.id, "معاينة البث / Preview:", reply_markup=None)
-    bot.send_message(m.chat.id, preview, reply_markup=kb, parse_mode=None)
+        return bot.reply_to(m, "Invalid amount")
+    users = load_json("users") or {}
+    u = users.setdefault(target, {"balance":0, "role":"user", "created_at": _now_str(), "lang":"ar"})
+    before = float(u.get("balance", 0))
+    after = round(before + amt, 4)
+    u["balance"] = after
+    save_json("users", users)
+    # notify user AR + EN with flags
+    try:
+        bot.send_message(int(target), f"🇸🇦 تم إضافة أرباحك اليومية إلى حسابك: {amt:g}$.\nرصيدك الحالي: {after:g}$\n\n🇺🇸 Your daily profit has been added to your account: ${amt:g}.\nCurrent balance: ${after:g}")
+    except Exception:
+        pass
+    return bot.reply_to(m, f"OK. Added {amt:g}$ to {target} (balance {before:g}$ → {after:g}$)")
+
+@bot.message_handler(commands=["fine"])
+@admin_only_guard
+def cmd_fine(m: types.Message):
+    parts = (m.text or "").split(maxsplit=3)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return bot.reply_to(m, "Usage: /fine <user_id> <amount> [reason]")
+    target = parts[1]
+    try:
+        amt = float(parts[2])
+    except Exception:
+        return bot.reply_to(m, "Invalid amount")
+    users = load_json("users") or {}
+    u = users.setdefault(target, {"balance":0, "role":"user", "created_at": _now_str(), "lang":"ar"})
+    before = float(u.get("balance", 0))
+    after = round(before - amt, 4)
+    u["balance"] = after
+    save_json("users", users)
+    # notify user AR + EN with flags
+    try:
+        bot.send_message(int(target), f"🇸🇦 تم خصم {amt:g}$ من رصيدك بسبب خسارة صفقة اليوم.\nرصيدك الحالي: {after:g}$\n\n🇺🇸 ${amt:g} has been deducted from your balance due to today’s losing trade.\nCurrent balance: ${after:g}")
+    except Exception:
+        pass
+    return bot.reply_to(m, f"OK. Deducted {amt:g}$ from {target} (balance {before:g}$ → {after:g}$)")
 
 
 @bot.message_handler(commands=["updateall"])
@@ -1631,16 +1677,27 @@ _pending_daily_for: Dict[int, str] = {}
 @bot.message_handler(commands=["setdaily"])
 @admin_only_guard
 def cmd_setdaily(m):
-    # Supports: /setdaily <user_id> <text>
+    # Expected: /setdaily <user_id> <text>
     txt = (m.text or "").strip()
     m1 = re.match(r"^/setdaily\s+(\d+)\s+(.+)$", txt, flags=re.S)
     if not m1:
-        return bot.reply_to(m, "/setdaily id text")
+        return bot.reply_to(m, "اكتب بالشكل: /setdaily <user_id> <text>")
     uid = int(m1.group(1))
-    dtext = m1.group(2).strip()
-    set_user_daily(uid, dtext)
-    bot.reply_to(m, f"Daily set for {uid}")
-
+    note = m1.group(2).strip()
+    # append to trades.json
+    try:
+        with open("trades.json","r",encoding="utf-8") as f: trades=json.load(f)
+    except Exception:
+        trades = {}
+    key=str(uid)
+    trades.setdefault(key, []).append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": note})
+    with open("trades.json","w",encoding="utf-8") as f: json.dump(trades, f, ensure_ascii=False, indent=2)
+    # notify user
+    try:
+        bot.send_message(uid, "🇸🇦 تنبيه: البوت قام بدخول صفقة يمكنك المراقبة عن طريق خيار \"صفقاتي اليومية\".\n🇺🇸 Alert: The bot has entered a trade, you can monitor it via the \"My Daily Trades\" option.")
+    except Exception:
+        pass
+    return bot.reply_to(m, f"تمت إضافة صفقة يومية للمستخدم {uid}.")
 
 @bot.message_handler(commands=["cleardaily"])
 def cmd_cleardaily(m: types.Message):
@@ -1694,8 +1751,11 @@ else:
     app.run(host="0.0.0.0", port=PORT)
 
 
-@bot.message_handler(commands=['setdailyall'])
+
+@bot.message_handler(commands=["setdailyall"])
+@admin_only_guard
 def cmd_setdailyall(m):
+
     try:
         return bot.reply_to(m, "تم إيقاف هذا الأمر (setdailyall) — غير مستخدم حالياً.")
     except Exception:
@@ -1704,25 +1764,23 @@ def cmd_setdailyall(m):
 @bot.message_handler(commands=["update"])
 @admin_only_guard
 def cmd_update(m):
-    parts = (m.text or "").split("\n", 1)
-    payload = parts[1] if len(parts) > 1 else ""
-    if not payload.strip() and m.reply_to_message and (m.reply_to_message.text or "").strip():
-        payload = m.reply_to_message.text
-    if not payload.strip():
-        return bot.reply_to(m, "ارسل نص التحديث بعد الأمر أو بالرد على الرسالة.\nSend the update text after the command or reply to a message.")
-    try:
-        ar, en = _split_ar_en(payload)
-    except Exception:
-        ar = en = payload.strip()
-    preview = _format_updates_msg(ar, en)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Send", callback_data="up:send"),
-           types.InlineKeyboardButton("✖️ Cancel", callback_data="up:cancel"))
-    ADMIN_STATES[m.from_user.id] = ("up_preview", (ar, en))
-    bot.send_message(m.chat.id, "معاينة التحديث / Preview:", reply_markup=None)
-    bot.send_message(m.chat.id, preview, reply_markup=kb, parse_mode=None)
-
-
+    # Body is either text after command or replied message text
+    payload = (m.text or "").split(maxsplit=1)
+    body = payload[1].strip() if len(payload)>1 else ""
+    if not body and m.reply_to_message:
+        body = (m.reply_to_message.text or "").strip()
+    if not body:
+        return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو ردّ على رسالة.")
+    # mass send with header
+    header = "🛠️ تحديث جديد - New Update"
+    ok=0; fail=0
+    for uid in iter_all_user_ids():
+        try:
+            bot.send_message(uid, f"{header}\n---------------------------\n{body}")
+            ok+=1
+        except Exception:
+            fail+=1
+    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
 
 @bot.callback_query_handler(func=lambda c: c.data in ("bc:send","bc:cancel","up:send","up:cancel"))
 @admin_only_guard
@@ -1824,102 +1882,3 @@ def change_balance(user_id, delta):
     return before, after
 
 
-# ===================== Injected Handlers (Safe) =====================
-
-@bot.message_handler(commands=['setdaily'])
-def cmd_setdaily(m):
-    if not is_admin(m.from_user.id):
-        return
-    args = m.text.split(maxsplit=2)
-    if len(args) < 3 or not args[1].isdigit():
-        return bot.reply_to(m, "Usage: /setdaily <user_id> <text>")
-    target = int(args[1]); note = args[2].strip()
-    # append to user's daily trades
-    try:
-        with open("trades.json","r",encoding="utf-8") as f: trades=json.load(f)
-    except Exception:
-        trades={}
-    key=str(target)
-    if key not in trades: trades[key]=[]
-    trades[key].append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": note})
-    with open("trades.json","w",encoding="utf-8") as f: json.dump(trades,f,ensure_ascii=False,indent=2)
-
-    # notify user (AR+EN flags)
-    try:
-        bot.send_message(target, inj_text(target,"alert_trade") + "\n" + inj_text(target,"alert_trade_en"))
-    except Exception as e:
-        pass
-    return bot.reply_to(m, f"تمت إضافة الصفقة اليومية للمستخدم {target}.")
-
-@bot.message_handler(commands=['addmoney'])
-def cmd_addmoney(m):
-    if not is_admin(m.from_user.id):
-        return
-    args = m.text.split(maxsplit=3)
-    if len(args) < 3 or not args[1].isdigit():
-        return bot.reply_to(m, "Usage: /addmoney <user_id> <amount> [reason]")
-    target = int(args[1]); amt = float(args[2])
-    before, after = change_balance(target, amt)
-    # notify user
-    try:
-        bot.send_message(target, inj_text(target,"addmoney_user", amt=f"{amt:g}", bal=f"{after:g}"), parse_mode="HTML")
-    except Exception:
-        pass
-    return bot.reply_to(m, f"تمت إضافة {amt:g}$ للمستخدم {target}. الرصيد: {before:g}$ ➜ {after:g}$.")
-
-@bot.message_handler(commands=['fine'])
-def cmd_fine(m):
-    if not is_admin(m.from_user.id):
-        return
-    args = m.text.split(maxsplit=3)
-    if len(args) < 3 or not args[1].isdigit():
-        return bot.reply_to(m, "Usage: /fine <user_id> <amount> [reason]")
-    target = int(args[1]); amt = float(args[2])
-    before, after = change_balance(target, -amt)
-    # notify user
-    try:
-        bot.send_message(target, inj_text(target,"fine_user", amt=f"{amt:g}", bal=f"{after:g}"), parse_mode="HTML")
-    except Exception:
-        pass
-    return bot.reply_to(m, f"تم خصم {amt:g}$ من المستخدم {target}. الرصيد: {before:g}$ ➜ {after:g}$.")
-
-def _mass_send(header, text):
-    ok=0; fail=0
-    for uid in iter_all_user_ids():
-        try:
-            bot.send_message(uid, f"{header}\n---------------------------\n{text}")
-            ok+=1
-        except Exception:
-            fail+=1
-    return ok, fail
-
-@bot.message_handler(commands=['update'])
-def cmd_update(m):
-    if not is_admin(m.from_user.id):
-        return
-    # text after command or replied message
-    payload = m.text.split(maxsplit=1)
-    body = ""
-    if len(payload)>1:
-        body = payload[1].strip()
-    elif m.reply_to_message:
-        body = m.reply_to_message.text or ""
-    if not body:
-        return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو كردّ على رسالة.")
-    ok, fail = _mass_send(inj_text(m.from_user.id,"upd_header"), body)
-    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
-
-@bot.message_handler(commands=['broadcast'])
-def cmd_broadcast(m):
-    if not is_admin(m.from_user.id):
-        return
-    payload = m.text.split(maxsplit=1)
-    body = ""
-    if len(payload)>1:
-        body = payload[1].strip()
-    elif m.reply_to_message:
-        body = m.reply_to_message.text or ""
-    if not body:
-        return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو كردّ على رسالة.")
-    ok, fail = _mass_send(inj_text(m.from_user.id,"brd_header"), body)
-    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
