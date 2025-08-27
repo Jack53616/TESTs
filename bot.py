@@ -910,34 +910,46 @@ def cmd_clearstats_all(m: types.Message):
 
 # ---------- Balance admin ----------
 def _notify_balance(uid_target: str):
-    # notify user in their language
+
+    # notify user (bilingual) with final balance line
     lang = get_lang(uid_target)
-    msg = "✅ تم ربط البوت بحسابك التداول ورصيدك {bal}$" if lang=="ar" else \
-          "✅ Bot linked to your trading account. Your balance is {bal}$"
     users = load_json("users") or {}
     bal = (users.get(uid_target,{}) or {}).get("balance",0)
-    try: bot.send_message(int(uid_target), msg.format(bal=bal))
-    except Exception: pass
+    msg = (
+        f"🇸🇦 تم ربط حساب التداول بالبوت وتم إضافة/تحديث الرصيد.\n"
+        f"رصيدك الحالي: {bal}$\n\n"
+        f"🇺🇸 Your trading account has been linked to the bot and balance was added/updated.\n"
+        f"Current balance: {bal}$"
+    )
+    try:
+        bot.send_message(int(uid_target), msg)
+    except Exception:
+        pass
 
 @bot.message_handler(commands=["setbal","addbal","takebal"])
 def cmd_balance_admin(m: types.Message):
     uid = ensure_user(m.chat.id)
     if not is_admin(uid): return bot.reply_to(m, T(uid,"admin_only"))
-    parts = (m.text or "").split()
+    parts = (m.text or '').split()
     if len(parts) < 3 or not parts[1].isdigit():
         return bot.reply_to(m, "Usage: /addbal <user_id> <amount>")
     target, amt = parts[1], parts[2]
     try: amount = float(amt)
     except Exception: return bot.reply_to(m, "Invalid amount")
-    users = load_json("users") or {}; u = users.setdefault(target, {"balance":0, "role":"user", "created_at": _now_str(), "lang":"ar"})
-    if False and m.text.startswith("/setbal"):
-        u["balance"] = amount
+    if len(parts) < 3 or not parts[1].isdigit():
+        return bot.reply_to(m, 'Usage: /setbal <user_id> <amount>')
+    target = parts[1]
+    amount = float(parts[2])
+    users = load_json('users') or {}
+    u = users.setdefault(target, {"balance":0, "role":"user", "created_at": _now_str(), "lang":"ar"})
+    if m.text.startswith('/setbal'):
+        u['balance'] = amount
     if m.text.startswith("/addbal"):
         u["balance"] = float(u.get("balance",0)) + amount
     elif m.text.startswith("/takebal"):
         return bot.reply_to(m, "This command is disabled.")
     save_json("users", users)
-    bot.reply_to(m, f"OK. {target} balance = {u['balance']:.2f}$")
+    bot.reply_to(m, f"تم ربط حساب التداول بحسابك بنجاح. تم ضبط رصيدك.")
     _notify_balance(target)
 
 
@@ -1532,12 +1544,31 @@ def cb_set_lang(c: types.CallbackQuery):
 
 @bot.callback_query_handler(func=lambda c: c.data=="daily_trade")
 def cb_daily(c: types.CallbackQuery):
+
     uid = ensure_user(c.from_user.id)
-    daily = _get_daily() or TEXT[get_lang(uid)]["daily_none"]
+    # load user's trades
+    trades = load_json("trades") or {}
+    arr = trades.get(str(uid), [])
+    if not arr:
+        msg = TEXT[get_lang(uid)]["daily_none"]
+    else:
+        last = arr[-1].get("text","").strip()
+        # if numeric amount, format with $
+        amt = None
+        try:
+            amt = float(last)
+        except Exception:
+            amt = None
+        if amt is not None:
+            detail = f"{amt:g}$"
+        else:
+            detail = last
+        msg = "🇸🇦 حال الصفقة: مفتوحة\nتم دخول صفقة والربح الحالي: {det}\n\n🇺🇸 Trade status: Open\nEntered a trade, current profit: {det}".format(det=detail)
+
     mm = types.InlineKeyboardMarkup()
     mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
            types.InlineKeyboardButton(TEXT[get_lang(uid)]["back_btn"], callback_data="go_back"))
-    bot.send_message(c.message.chat.id, daily if isinstance(daily,str) else str(daily), reply_markup=mm)
+    bot.send_message(c.message.chat.id, msg, reply_markup=mm)
 
 @bot.callback_query_handler(func=lambda c: c.data=="withdraw_menu")
 def cb_wmenu(c: types.CallbackQuery):
@@ -1712,6 +1743,23 @@ def cmd_cleardaily(m: types.Message):
 def on_setdaily_text(m: types.Message):
     target = _pending_daily_for.pop(m.from_user.id); users = load_json("users") or {}; u=users.setdefault(target, {})
     u["daily"] = (m.text or "").strip()[:2000]; save_json("users", users); bot.reply_to(m, f"تم ضبط الصفقات اليومية للمستخدم {target}.")
+
+
+@bot.message_handler(commands=["redaily"])
+@admin_only_guard
+def cmd_redaily(m: types.Message):
+    parts = (m.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return bot.reply_to(m, "Usage: /redaily <user_id>")
+    target = parts[1]
+    trades = load_json("trades") or {}
+    if target in trades:
+        trades.pop(target, None)
+        save_json("trades", trades)
+        return bot.reply_to(m, f"تم حذف الصفقات اليومية للمستخدم {target}.")
+    else:
+        return bot.reply_to(m, f"لا توجد صفقات يومية للمستخدم {target}.")
+
 
 # ---------- Health + Webhook ----------
 @app.route("/healthz", methods=["GET"])
