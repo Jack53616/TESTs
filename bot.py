@@ -1003,7 +1003,7 @@ def cmd_addmoney(m: types.Message):
     save_json("users", users)
     # notify user AR + EN with flags
     try:
-        bot.send_message(int(target), f"🇸🇦 تم إضافة أرباحك اليومية إلى حسابك: {amt:g}$.\nرصيدك الحالي: {after:g}$\n\n🇺🇸 Your daily profit has been added to your account: ${amt:g}.\nCurrent balance: ${after:g}")
+        bot.send_message(int(target), f"🇸🇦 تم إضافة أرباحك اليومية إلى حسابك: ${amt}.\nرصيدك الحالي: {after:g}$\n\n🇺🇸 Your daily profit has been added to your account: ${amt}.\nCurrent balance: ${after:g}")
     except Exception:
         pass
     return bot.reply_to(m, f"OK. Added {amt:g}$ to {target} (balance {before:g}$ → {after:g}$)")
