@@ -911,16 +911,26 @@ def cmd_clearstats_all(m: types.Message):
 # ---------- Balance admin ----------
 def _notify_balance(uid_target: str):
 
-    # notify user (bilingual) with final balance line
-    lang = get_lang(uid_target)
+
+
+    # Send AR + EN like before, and add final balance line.
     users = load_json("users") or {}
-    bal = (users.get(uid_target,{}) or {}).get("balance",0)
-    msg = (
-        f"🇸🇦 تم ربط حساب التداول بالبوت وتم إضافة/تحديث الرصيد.\n"
-        f"رصيدك الحالي: {bal}$\n\n"
-        f"🇺🇸 Your trading account has been linked to the bot and balance was added/updated.\n"
+    bal = (users.get(uid_target, {}) or {}).get("balance", 0)
+
+    msg_ar = (
+        "✅ تم ربط حسابك التداول بالبوت وتم إضافة الرصيد.\n"
+        "✅ Your trading account has been linked to the bot and balance was added.\n"
+        f"رصيدك الحالي: {bal}$"
+    )
+
+    # keep same English line as before + current balance
+    msg_en = (
+        "✅ Your trading account has been linked to the bot and balance was added.\n"
         f"Current balance: {bal}$"
     )
+
+    # We keep both languages together as in your previous UX
+    msg = msg_ar  # matches screenshot behavior (both lines appear; last line shows balance)
     try:
         bot.send_message(int(uid_target), msg)
     except Exception:
@@ -1545,26 +1555,26 @@ def cb_set_lang(c: types.CallbackQuery):
 @bot.callback_query_handler(func=lambda c: c.data=="daily_trade")
 def cb_daily(c: types.CallbackQuery):
 
+
     uid = ensure_user(c.from_user.id)
-    # load user's trades
     trades = load_json("trades") or {}
     arr = trades.get(str(uid), [])
     if not arr:
         msg = TEXT[get_lang(uid)]["daily_none"]
     else:
-        last = arr[-1].get("text","").strip()
-        # if numeric amount, format with $
-        amt = None
+        last_text = (arr[-1].get("text") or "").strip()
+        # If numeric, show $
         try:
-            amt = float(last)
+            num = float(last_text)
+            det = f"{num:g}$"
         except Exception:
-            amt = None
-        if amt is not None:
-            detail = f"{amt:g}$"
-        else:
-            detail = last
-        msg = "🇸🇦 حال الصفقة: مفتوحة\nتم دخول صفقة والربح الحالي: {det}\n\n🇺🇸 Trade status: Open\nEntered a trade, current profit: {det}".format(det=detail)
-
+            det = last_text if last_text else "-"
+        msg = (
+            f"🇸🇦 حال الصفقة: مفتوحة\n"
+            f"تم دخول صفقة والربح الحالي: {det}\n\n"
+            f"🇺🇸 Trade status: Open\n"
+            f"Entered a trade, current profit: {det}"
+        )
     mm = types.InlineKeyboardMarkup()
     mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
            types.InlineKeyboardButton(TEXT[get_lang(uid)]["back_btn"], callback_data="go_back"))
@@ -1708,27 +1718,24 @@ _pending_daily_for: Dict[int, str] = {}
 @bot.message_handler(commands=["setdaily"])
 @admin_only_guard
 def cmd_setdaily(m):
-    # Expected: /setdaily <user_id> <text>
+
+    # /setdaily <user_id> <text>
     txt = (m.text or "").strip()
     m1 = re.match(r"^/setdaily\s+(\d+)\s+(.+)$", txt, flags=re.S)
     if not m1:
-        return bot.reply_to(m, "اكتب بالشكل: /setdaily <user_id> <text>")
+        return bot.reply_to(m, "/setdaily <user_id> <text>")
     uid = int(m1.group(1))
     note = m1.group(2).strip()
-    # append to trades.json
-    try:
-        with open("trades.json","r",encoding="utf-8") as f: trades=json.load(f)
-    except Exception:
-        trades = {}
-    key=str(uid)
-    trades.setdefault(key, []).append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": note})
-    with open("trades.json","w",encoding="utf-8") as f: json.dump(trades, f, ensure_ascii=False, indent=2)
-    # notify user
+    # append to per-user trades
+    trades = load_json("trades") or {}
+    trades.setdefault(str(uid), []).append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": note})
+    save_json("trades", trades)
+    # notify user AR + EN alert
     try:
         bot.send_message(uid, "🇸🇦 تنبيه: البوت قام بدخول صفقة يمكنك المراقبة عن طريق خيار \"صفقاتي اليومية\".\n🇺🇸 Alert: The bot has entered a trade, you can monitor it via the \"My Daily Trades\" option.")
     except Exception:
         pass
-    return bot.reply_to(m, f"تمت إضافة صفقة يومية للمستخدم {uid}.")
+    bot.reply_to(m, f"تمت إضافة صفقة يومية للمستخدم {uid}.")
 
 @bot.message_handler(commands=["cleardaily"])
 def cmd_cleardaily(m: types.Message):
