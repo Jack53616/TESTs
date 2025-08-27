@@ -1569,12 +1569,19 @@ def cb_daily(c: types.CallbackQuery):
             det = f"{num:g}$"
         except Exception:
             det = last_text if last_text else "-"
-        msg = (
-            f"🇸🇦 حال الصفقة: مفتوحة\n"
-            f"تم دخول صفقة والربح الحالي: {det}\n\n"
-            f"🇺🇸 Trade status: Open\n"
-            f"Entered a trade, current profit: {det}"
-        )
+        label_ar = "الربح الحالي" if (isinstance(num, float) and num >= 0) else "الخسارة الحالية"
+label_en = "current profit" if (isinstance(num, float) and num >= 0) else "current loss"
+val = det if (not isinstance(num, float)) else (f"${abs(num):g}")
+msg = (
+    f"🇸🇦 حال الصفقة: مفتوحة
+"
+    f"تم دخول صفقة و{label_ar}: {val}
+
+"
+    f"🇺🇸 Trade status: Open
+"
+    f"Entered a trade, {label_en}: {val}"
+)
     mm = types.InlineKeyboardMarkup()
     mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
            types.InlineKeyboardButton(TEXT[get_lang(uid)]["back_btn"], callback_data="go_back"))
