@@ -1635,7 +1635,7 @@ def cmd_setdaily(m):
     txt = (m.text or "").strip()
     m1 = re.match(r"^/setdaily\s+(\d+)\s+(.+)$", txt, flags=re.S)
     if not m1:
-        return bot.reply_to(m, "/setdaily id text - setdailyall text")
+        return bot.reply_to(m, "/setdaily id text")
     uid = int(m1.group(1))
     dtext = m1.group(2).strip()
     set_user_daily(uid, dtext)
@@ -1694,15 +1694,12 @@ else:
     app.run(host="0.0.0.0", port=PORT)
 
 
-
-@bot.message_handler(commands=["setdailyall"])
-@admin_only_guard
+@bot.message_handler(commands=['setdailyall'])
 def cmd_setdailyall(m):
-
-try:
-    return bot.reply_to(m, "تم إيقاف هذا الأمر (setdailyall) — غير مستخدم حالياً.")
-except Exception:
-    return
+    try:
+        return bot.reply_to(m, "تم إيقاف هذا الأمر (setdailyall) — غير مستخدم حالياً.")
+    except Exception:
+        return
 
 @bot.message_handler(commands=["update"])
 @admin_only_guard
