@@ -7,6 +7,21 @@ import re, time
 import warnings
 ADMIN_STATES = {}  # {admin_id: (state, payload)}
 
+
+# --- injected helpers ---
+def get_lang(user_id):
+    try:
+        uid=str(user_id)
+        if os.path.exists("users.json"):
+            import json
+            with open("users.json","r",encoding="utf-8") as f:
+                u=json.load(f)
+            if uid in u and isinstance(u[uid], dict) and u[uid].get("lang"):
+                return u[uid]["lang"]
+    except Exception:
+        pass
+    return "ar"
+
 # ---- Admin guard (injected) ----
 try:
     ADMINS
@@ -294,7 +309,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "key_invalid": "❌ مفتاح غير صالح أو مستخدم مسبقاً.",
 "key_expired": "⛔ انتهى اشتراكك. أدخل مفتاح شهري جديد.",
 
-"btn_daily": "📈 صفقة اليوم",
+"btn_daily": "📈 صفقاتي اليومية",
 "btn_withdraw": "💸 سحب",
 "btn_wstatus": "💼 معاملات السحب",
 "btn_stats": "📊 الإحصائيات",
@@ -305,7 +320,7 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "btn_buy": "🛒 شراء اشتراك",
 
 "help_title": "🛠 الأوامر المتاحة:",
-"daily_none": "لا يوجد صفقة اليوم حالياً.",
+"daily_none": "لا توجد صفقات يومية حالياً.",
 "withdraw_enter": "❌ الصيغة: /withdraw 50",
 "withdraw_invalid": "❌ مبلغ غير صالح.",
 "withdraw_insufficient": "الرصيد غير كافٍ. رصيدك: {bal}$",
@@ -398,8 +413,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "tr": {
 "welcome":"👋 Trading botuna hoş geldin\n\n💰 Bakiyen: {balance}$\n⏳ Abonelik bitimine: {remain}\n🆔 ID: {user_id}",
 "need_key":"🔑 Abonelik anahtarını gir.\nMevcut: sadece aylık.","key_ok":"✅ (Aylık) aboneliğin etkin. Bitiş: {exp}\nMenü için /start.","key_ok_life":"✅ Ömür boyu abonelik etkin. Keyfini çıkar!","key_invalid":"❌ Geçersiz ya da kullanılmış anahtar.","key_expired":"⛔ Aboneliğin bitti. Yeni aylık anahtar gir.",
-"btn_daily":"📈 Günün işlemi","btn_withdraw":"💸 Çekim","btn_wstatus":"💼 Çekim talepleri","btn_stats":"📊 İstatistikler","btn_lang":"🌐 Dil","btn_deposit":"💳 Yatırma","btn_website":"🌍 Web sitemiz","btn_support":"📞 Destek","btn_buy":"🛒 Abonelik satın al",
-"help_title":"🛠 Kullanılabilir komutlar:","daily_none":"Henüz günlük işlem yok.","withdraw_enter":"❌ Format: /withdraw 50","withdraw_invalid":"❌ Geçersiz tutar.","withdraw_insufficient":"Yetersiz bakiye. Bakiyen: {bal}$","withdraw_created":"✅ #{req_id} numaralı çekim talebi {amount}$ için oluşturuldu.",
+"btn_daily":"📈 Günlük İşlemlerim","btn_withdraw":"💸 Çekim","btn_wstatus":"💼 Çekim talepleri","btn_stats":"📊 İstatistikler","btn_lang":"🌐 Dil","btn_deposit":"💳 Yatırma","btn_website":"🌍 Web sitemiz","btn_support":"📞 Destek","btn_buy":"🛒 Abonelik satın al",
+"help_title":"🛠 Kullanılabilir komutlar:","daily_none":"Henüz günlük işlemleriniz yok.","withdraw_enter":"❌ Format: /withdraw 50","withdraw_invalid":"❌ Geçersiz tutar.","withdraw_insufficient":"Yetersiz bakiye. Bakiyen: {bal}$","withdraw_created":"✅ #{req_id} numaralı çekim talebi {amount}$ için oluşturuldu.",
 "lang_menu_title":"Dilini seç:","lang_saved":"✅ Dil Türkçe olarak ayarlandı.","choose_withdraw_amount":"Çekim tutarını seç:","requests_waiting":"Bekleyen taleplerin:","no_requests":"Bekleyen talep yok.",
 "deposit_choose":"Bir yatırma yöntemi seç:","deposit_cash":"💵 Nakit","deposit_paypal":"🅿️ PayPal","deposit_bank":"🏦 Banka Havalesi","deposit_mc":"💳 Mastercard","deposit_visa":"💳 Visa","deposit_msg":"{method} ile ödeme için bizimle iletişime geçin. Aşağı dokunun:","contact_us":"📩 Bizimle iletişim","website_msg":"🔥 Web sitemizi ziyaret etmek için dokunun:","website_not_set":"ℹ️ Website URL henüz ayarlı değil.","support_msg":"Destek için aşağı dokunun:",
 "stats_title":"📊 İstatistiklerin","stats_line_win":"{at} — Kazanç +{amount}$","stats_line_loss":"{at} — Kayıp -{amount}$",
@@ -433,8 +448,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "es": {
 "welcome":"👋 Bienvenido al bot de trading\n\n💰 Tu saldo: {balance}$\n⏳ La suscripción termina en: {remain}\n🆔 Tu ID: {user_id}",
 "need_key":"🔑 Ingresa tu clave de suscripción.\nDisponible: solo mensual.","key_ok":"✅ Tu suscripción (mensual) está activa. Expira: {exp}\nUsa /start para abrir el menú.","key_ok_life":"✅ Suscripción de por vida activada. ¡Disfruta!","key_invalid":"❌ Clave inválida o usada.","key_expired":"⛔ Tu suscripción expiró. Ingresa una clave mensual nueva.",
-"btn_daily":"📈 Operación del día","btn_withdraw":"💸 Retirar","btn_wstatus":"💼 Solicitudes de retiro","btn_stats":"📊 Estadísticas","btn_lang":"🌐 Idioma","btn_deposit":"💳 Depósito","btn_website":"🌍 Sitio web","btn_support":"📞 Contactar soporte","btn_buy":"🛒 Comprar suscripción",
-"help_title":"🛠 Comandos disponibles:","daily_none":"Aún no hay operación del día.","withdraw_enter":"❌ Formato: /withdraw 50","withdraw_invalid":"❌ Monto inválido.","withdraw_insufficient":"Saldo insuficiente. Tu saldo: {bal}$","withdraw_created":"✅ Solicitud #{req_id} creada por {amount}$.",
+"btn_daily":"📈 Mis operaciones diarias","btn_withdraw":"💸 Retirar","btn_wstatus":"💼 Solicitudes de retiro","btn_stats":"📊 Estadísticas","btn_lang":"🌐 Idioma","btn_deposit":"💳 Depósito","btn_website":"🌍 Sitio web","btn_support":"📞 Contactar soporte","btn_buy":"🛒 Comprar suscripción",
+"help_title":"🛠 Comandos disponibles:","daily_none":"Aún no tienes operaciones diarias.","withdraw_enter":"❌ Formato: /withdraw 50","withdraw_invalid":"❌ Monto inválido.","withdraw_insufficient":"Saldo insuficiente. Tu saldo: {bal}$","withdraw_created":"✅ Solicitud #{req_id} creada por {amount}$.",
 "lang_menu_title":"Elige tu idioma:","lang_saved":"✅ Idioma configurado a español.","choose_withdraw_amount":"Elige el monto a retirar:","requests_waiting":"Tus solicitudes pendientes:","no_requests":"No hay solicitudes pendientes.",
 "deposit_choose":"Elige un método de depósito:","deposit_cash":"💵 Efectivo","deposit_paypal":"🅿️ PayPal","deposit_bank":"🏦 Transferencia bancaria","deposit_mc":"💳 Mastercard","deposit_visa":"💳 Visa","deposit_msg":"Para pagar con {method}, contáctanos directamente.","contact_us":"📩 Contáctanos","website_msg":"🔥 Visita nuestro sitio:","website_not_set":"ℹ️ La URL del sitio no está configurada.","support_msg":"Pulsa abajo para contactar soporte:",
 "stats_title":"📊 Tus estadísticas","stats_line_win":"{at} — Ganancia +{amount}$","stats_line_loss":"{at} — Pérdida -{amount}$",
@@ -468,8 +483,8 @@ TEXT: Dict[str, Dict[str, Any]] = {
 "fr": {
 "welcome":"👋 Bienvenue dans le bot de trading\n\n💰 Votre solde : {balance}$\n⏳ L’abonnement se termine dans : {remain}\n🆔 Votre ID : {user_id}",
 "need_key":"🔑 Saisissez votre clé d’abonnement.\nDisponible : mensuel uniquement.","key_ok":"✅ Votre abonnement (mensuel) est activé. Expire : {exp}\nUtilisez /start.","key_ok_life":"✅ Abonnement à vie activé. Profitez-en !","key_invalid":"❌ Clé invalide ou déjà utilisée.","key_expired":"⛔ Votre abonnement a expiré. Saisissez une clé mensuelle.",
-"btn_daily":"📈 Trade du jour","btn_withdraw":"💸 Retrait","btn_wstatus":"💼 Demandes de retrait","btn_stats":"📊 Statistiques","btn_lang":"🌐 Langue","btn_deposit":"💳 Dépôt","btn_website":"🌍 Site web","btn_support":"📞 Support","btn_buy":"🛒 Acheter un abonnement",
-"help_title":"🛠 Commandes disponibles :","daily_none":"Aucun trade du jour.","withdraw_enter":"❌ Format : /withdraw 50","withdraw_invalid":"❌ Montant invalide.","withdraw_insufficient":"Solde insuffisant. Votre solde : {bal}$","withdraw_created":"✅ Demande #{req_id} créée pour {amount}$.",
+"btn_daily":"📈 Mes opérations quotidiennes","btn_withdraw":"💸 Retrait","btn_wstatus":"💼 Demandes de retrait","btn_stats":"📊 Statistiques","btn_lang":"🌐 Langue","btn_deposit":"💳 Dépôt","btn_website":"🌍 Site web","btn_support":"📞 Support","btn_buy":"🛒 Acheter un abonnement",
+"help_title":"🛠 Commandes disponibles :","daily_none":"Aucune opération quotidienne.","withdraw_enter":"❌ Format : /withdraw 50","withdraw_invalid":"❌ Montant invalide.","withdraw_insufficient":"Solde insuffisant. Votre solde : {bal}$","withdraw_created":"✅ Demande #{req_id} créée pour {amount}$.",
 "lang_menu_title":"Sélectionnez votre langue :","lang_saved":"✅ Langue définie sur le français.","choose_withdraw_amount":"Choisissez le montant du retrait :","requests_waiting":"Vos demandes en attente :","no_requests":"Aucune demande en attente.",
 "deposit_choose":"Choisissez une méthode de dépôt :","deposit_cash":"💵 Espèces","deposit_paypal":"🅿️ PayPal","deposit_bank":"🏦 Virement bancaire","deposit_mc":"💳 Mastercard","deposit_visa":"💳 Visa","deposit_msg":"Pour payer via {method}, contactez-nous.","contact_us":"📩 Nous contacter","website_msg":"🔥 Visitez notre site :","website_not_set":"ℹ️ L’URL du site n’est pas définie.","support_msg":"Appuyez ci-dessous pour contacter le support :",
 "stats_title":"📊 Vos statistiques","stats_line_win":"{at} — Gain +{amount}$","stats_line_loss":"{at} — Perte -{amount}$",
@@ -670,7 +685,7 @@ def cmd_help(m: types.Message):
     lang = get_lang(uid)
     isadm = is_admin(uid)
     DESCS = {
-        "ar": {"start":"القائمة الرئيسية","help":"قائمة الأوامر","id":"إظهار آيديك","balance":"رصيدك","daily":"صفقة اليوم",
+        "ar": {"start":"القائمة الرئيسية","help":"قائمة الأوامر","id":"إظهار آيديك","balance":"رصيدك","daily":"صفقاتي اليومية",
                "withdraw":"طلب سحب (اكتب المبلغ بعد الأمر)","wlist":"طلبات السحب المعلقة","mystats":"إحصائياتي","mystatus":"حالة الاشتراك","lang":"تغيير اللغة",
                "addbalance":"STAFF: إضافة رصيد","setdaily":"STAFF: تعيين اليومية","setdaily_all":"ADMIN: تعيين اليومية للجميع","cleardaily_all":"ADMIN: مسح اليومية للجميع",
                "cleardaily":"ADMIN: مسح اليومية لمستخدم","genkey":"ADMIN: توليد مفاتيح","delkey":"ADMIN: حذف مفتاح","gensub":"ADMIN: منح اشتراك","delsub":"ADMIN: حذف اشتراك",
@@ -810,7 +825,7 @@ def cmd_setdaily_all(m: types.Message):
     if not is_admin(uid): return bot.reply_to(m, T(uid, "admin_only"))
     parts = (m.text or "").split(maxsplit=1)
     if len(parts)<2 or not parts[1].strip():
-        return bot.reply_to(m, "Usage: /setdaily_all <text>")
+        return bot.reply_to(m, "Usage:  <text>")
     text = parts[1].strip()[:2000]
     users = load_json("users") or {}
     for k in users.keys():
@@ -1683,17 +1698,11 @@ else:
 @bot.message_handler(commands=["setdailyall"])
 @admin_only_guard
 def cmd_setdailyall(m):
-    txt = (m.text or "").strip()
-    m1 = re.match(r"^/setdailyall\s+(.+)$", txt, flags=re.S)
-    if not m1:
-        return bot.reply_to(m, "/setdaily id text - setdailyall text")
-    dtext = m1.group(1).strip()
-    cnt = 0
-    for uid in iter_all_users():
-        set_user_daily(uid, dtext); cnt += 1
-    bot.reply_to(m, f"Daily set for ALL ({cnt})")
 
-
+try:
+    return bot.reply_to(m, "تم إيقاف هذا الأمر (setdailyall) — غير مستخدم حالياً.")
+except Exception:
+    return
 
 @bot.message_handler(commands=["update"])
 @admin_only_guard
@@ -1749,3 +1758,171 @@ def cb_broadcast_preview(c):
     try: bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
     except: pass
     bot.send_message(c.message.chat.id, f"✅ Done. Sent to {sent} users.")
+
+
+
+# Iterate all user ids from users.json
+def iter_all_user_ids():
+    try:
+        with open("users.json","r",encoding="utf-8") as f:
+            data=json.load(f)
+        for uid in data.keys():
+            yield int(uid)
+    except Exception:
+        return
+
+
+
+# Minimal i18n for injected features
+INJ = {
+  "ar": {
+    "alert_trade": "🇸🇦 تنبيه: البوت قام بدخول صفقة يمكنك المراقبة عن طريق خيار \"صفقاتي اليومية\".",
+    "alert_trade_en": "🇺🇸 Alert: The bot has entered a trade, you can monitor it via the \"My Daily Trades\" option.",
+    "addmoney_user": "🇸🇦 تم إضافة أرباحك اليومية إلى حسابك: {amt}$.\nرصيدك الحالي: {bal}$\n\n🇺🇸 Your daily profit has been added to your account: ${amt}.\nCurrent balance: ${bal}",
+    "fine_user": "🇸🇦 تم خصم {amt}$ من رصيدك بسبب خسارة صفقة اليوم.\nرصيدك الحالي: {bal}$\n\n🇺🇸 ${amt} has been deducted from your balance due to today’s losing trade.\nCurrent balance: ${bal}",
+    "upd_header": "🛠️ تحديث جديد - New Update",
+    "brd_header": "📰 خبار جديد - Breaking News"
+  },
+  "tr": {
+    "alert_trade": "🇸🇦 تنبيه: البوت قام بدخول صفقة يمكنك المراقبة عن طريق خيار \"صفقاتي اليومية\".",
+    "alert_trade_en": "🇺🇸 Alert: The bot has entered a trade, you can monitor it via the \"My Daily Trades\" option.",
+    "addmoney_user": "🇸🇦 تم إضافة أرباحك اليومية إلى حسابك: {amt}$.\nرصيدك الحالي: {bal}$\n\n🇺🇸 Your daily profit has been added to your account: ${amt}.\nCurrent balance: ${bal}",
+    "fine_user": "🇸🇦 تم خصم {amt}$ من رصيدك بسبب خسارة صفقة اليوم.\nرصيدك الحالي: {bal}$\n\n🇺🇸 ${amt} has been deducted from your balance due to today’s losing trade.\nCurrent balance: ${bal}",
+    "upd_header": "🛠️ تحديث جديد - New Update",
+    "brd_header": "📰 خبار جديد - Breaking News"
+  },
+  "en": {
+    "alert_trade": "🇸🇦 Alert: The bot has entered a trade; check \"My Daily Trades\".",
+    "alert_trade_en": "🇺🇸 Alert: The bot has entered a trade, check \"My Daily Trades\".",
+    "addmoney_user": "🇺🇸 Your daily profit has been added to your account: ${amt}.\nCurrent balance: ${bal}",
+    "fine_user": "🇺🇸 ${amt} has been deducted from your balance due to today’s losing trade.\nCurrent balance: ${bal}",
+    "upd_header": "🛠️ New Update",
+    "brd_header": "📰 Breaking News"
+  }
+}
+def inj_text(user_id, key, **kw):
+    lang = "ar"
+    try:
+        lang = get_lang(user_id)
+    except Exception:
+        pass
+    t = INJ.get(lang, INJ["ar"]).get(key, "")
+    try:
+        return t.format(**kw)
+    except Exception:
+        return t
+
+
+def change_balance(user_id, delta):
+    uid=str(user_id)
+    # fallback JSON store
+    with open("users.json","r",encoding="utf-8") as f:
+        data=json.load(f)
+    if uid not in data: data[uid] = {"balance": 0}
+    before = float(data[uid].get("balance", 0))
+    after = round(before + float(delta), 4)
+    data[uid]["balance"] = after
+    with open("users.json","w",encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return before, after
+
+
+# ===================== Injected Handlers (Safe) =====================
+
+@bot.message_handler(commands=['setdaily'])
+def cmd_setdaily(m):
+    if not is_admin(m.from_user.id):
+        return
+    args = m.text.split(maxsplit=2)
+    if len(args) < 3 or not args[1].isdigit():
+        return bot.reply_to(m, "Usage: /setdaily <user_id> <text>")
+    target = int(args[1]); note = args[2].strip()
+    # append to user's daily trades
+    try:
+        with open("trades.json","r",encoding="utf-8") as f: trades=json.load(f)
+    except Exception:
+        trades={}
+    key=str(target)
+    if key not in trades: trades[key]=[]
+    trades[key].append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": note})
+    with open("trades.json","w",encoding="utf-8") as f: json.dump(trades,f,ensure_ascii=False,indent=2)
+
+    # notify user (AR+EN flags)
+    try:
+        bot.send_message(target, inj_text(target,"alert_trade") + "\n" + inj_text(target,"alert_trade_en"))
+    except Exception as e:
+        pass
+    return bot.reply_to(m, f"تمت إضافة الصفقة اليومية للمستخدم {target}.")
+
+@bot.message_handler(commands=['addmoney'])
+def cmd_addmoney(m):
+    if not is_admin(m.from_user.id):
+        return
+    args = m.text.split(maxsplit=3)
+    if len(args) < 3 or not args[1].isdigit():
+        return bot.reply_to(m, "Usage: /addmoney <user_id> <amount> [reason]")
+    target = int(args[1]); amt = float(args[2])
+    before, after = change_balance(target, amt)
+    # notify user
+    try:
+        bot.send_message(target, inj_text(target,"addmoney_user", amt=f"{amt:g}", bal=f"{after:g}"), parse_mode="HTML")
+    except Exception:
+        pass
+    return bot.reply_to(m, f"تمت إضافة {amt:g}$ للمستخدم {target}. الرصيد: {before:g}$ ➜ {after:g}$.")
+
+@bot.message_handler(commands=['fine'])
+def cmd_fine(m):
+    if not is_admin(m.from_user.id):
+        return
+    args = m.text.split(maxsplit=3)
+    if len(args) < 3 or not args[1].isdigit():
+        return bot.reply_to(m, "Usage: /fine <user_id> <amount> [reason]")
+    target = int(args[1]); amt = float(args[2])
+    before, after = change_balance(target, -amt)
+    # notify user
+    try:
+        bot.send_message(target, inj_text(target,"fine_user", amt=f"{amt:g}", bal=f"{after:g}"), parse_mode="HTML")
+    except Exception:
+        pass
+    return bot.reply_to(m, f"تم خصم {amt:g}$ من المستخدم {target}. الرصيد: {before:g}$ ➜ {after:g}$.")
+
+def _mass_send(header, text):
+    ok=0; fail=0
+    for uid in iter_all_user_ids():
+        try:
+            bot.send_message(uid, f"{header}\n---------------------------\n{text}")
+            ok+=1
+        except Exception:
+            fail+=1
+    return ok, fail
+
+@bot.message_handler(commands=['update'])
+def cmd_update(m):
+    if not is_admin(m.from_user.id):
+        return
+    # text after command or replied message
+    payload = m.text.split(maxsplit=1)
+    body = ""
+    if len(payload)>1:
+        body = payload[1].strip()
+    elif m.reply_to_message:
+        body = m.reply_to_message.text or ""
+    if not body:
+        return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو كردّ على رسالة.")
+    ok, fail = _mass_send(inj_text(m.from_user.id,"upd_header"), body)
+    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
+
+@bot.message_handler(commands=['broadcast'])
+def cmd_broadcast(m):
+    if not is_admin(m.from_user.id):
+        return
+    payload = m.text.split(maxsplit=1)
+    body = ""
+    if len(payload)>1:
+        body = payload[1].strip()
+    elif m.reply_to_message:
+        body = m.reply_to_message.text or ""
+    if not body:
+        return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو كردّ على رسالة.")
+    ok, fail = _mass_send(inj_text(m.from_user.id,"brd_header"), body)
+    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
