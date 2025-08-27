@@ -1556,6 +1556,7 @@ def cb_set_lang(c: types.CallbackQuery):
 def cb_daily(c: types.CallbackQuery):
 
 
+
     uid = ensure_user(c.from_user.id)
     trades = load_json("trades") or {}
     arr = trades.get(str(uid), [])
@@ -1563,25 +1564,26 @@ def cb_daily(c: types.CallbackQuery):
         msg = TEXT[get_lang(uid)]["daily_none"]
     else:
         last_text = (arr[-1].get("text") or "").strip()
-        # If numeric, show $
+        num = None
         try:
             num = float(last_text)
-            det = f"{num:g}$"
         except Exception:
-            det = last_text if last_text else "-"
-        label_ar = "الربح الحالي" if (isinstance(num, float) and num >= 0) else "الخسارة الحالية"
-label_en = "current profit" if (isinstance(num, float) and num >= 0) else "current loss"
-val = det if (not isinstance(num, float)) else (f"${abs(num):g}")
-msg = (
-    f"🇸🇦 حال الصفقة: مفتوحة
-"
-    f"تم دخول صفقة و{label_ar}: {val}
+            pass
+        if isinstance(num, float):
+            label_ar = "الربح الحالي" if num >= 0 else "الخسارة الحالية"
+            label_en = "current profit" if num >= 0 else "current loss"
+            val = f"${abs(num):g}"
+        else:
+            label_ar = "الربح الحالي"
+            label_en = "current profit"
+            val = last_text if last_text else "-"
+        msg = (
+            f"🇸🇦 حال الصفقة: مفتوحة\n"
+            f"تم دخول صفقة و{label_ar}: {val}\n\n"
+            f"🇺🇸 Trade status: Open\n"
+            f"Entered a trade, {label_en}: {val}"
+        )
 
-"
-    f"🇺🇸 Trade status: Open
-"
-    f"Entered a trade, {label_en}: {val}"
-)
     mm = types.InlineKeyboardMarkup()
     mm.add(types.InlineKeyboardButton(TEXT[get_lang(uid)]["btn_lang"], callback_data="lang_menu"),
            types.InlineKeyboardButton(TEXT[get_lang(uid)]["back_btn"], callback_data="go_back"))
