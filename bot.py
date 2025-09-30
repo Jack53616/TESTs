@@ -964,21 +964,32 @@ def cmd_balance_admin(m: types.Message):
 
 
 
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+
 @bot.message_handler(commands=["broadcast"])
 @admin_only_guard
 def cmd_broadcast(m):
+    logging.debug(f"Received message: {m.text}")
+
     # Extract message text
     payload = (m.text or "").split(maxsplit=1)
     body = payload[1].strip() if len(payload) > 1 else ""
+    
+    logging.debug(f"Extracted body from command: {body}")
 
     # If no body, try getting it from the replied message
     if not body and m.reply_to_message:
         body = (m.reply_to_message.text or "").strip()
+        logging.debug(f"Extracted body from reply message: {body}")
 
     # If still no body, send instruction
     if not body:
+        logging.debug("No valid body found, sending instruction.")
         return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو ردّ على رسالة.")
-
+    
+    # If we have a body, continue
     header = "📰 خبار جديد - Breaking News"
     ok, fail = 0, 0
 
@@ -989,10 +1000,10 @@ def cmd_broadcast(m):
             ok += 1
         except Exception as e:
             fail += 1
-            # Optionally log the error:
-            # print(f"Failed to send to {uid}: {e}")
+            logging.error(f"Failed to send to {uid}: {e}")
 
     # Send a summary to the admin
+    logging.debug(f"Sent {ok} messages successfully, {fail} failed.")
     return bot.reply_to(m, f"✅ تم الإرسال: {ok} نجاح / ❌ {fail} فشل.")
 
 
