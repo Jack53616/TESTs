@@ -752,6 +752,26 @@ def cmd_setbal(m: types.Message):
     except Exception: pass
     return bot.reply_to(m, f"OK. balance of {target} = {amount}")
 
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    text = message.text.replace('/broadcast', '').strip()
+    if not text:
+        return bot.send_message(message.chat.id, "❌ اكتب الرسالة بعد الأمر.\nمثال:\n/broadcast مرحبا جميعاً!")
+
+    count = 0
+    for uid in users:
+        try:
+            bot.send_message(int(uid), f"📢 {text}")
+            count += 1
+        except:
+            continue
+
+    bot.send_message(message.chat.id, f"✅ تم الإرسال إلى {count} مستخدم.")
+
 @bot.message_handler(commands=["takebal"])
 def cmd_takebal(m: types.Message):
     uid = ensure_user(m.chat.id)
