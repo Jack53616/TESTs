@@ -967,21 +967,33 @@ def cmd_balance_admin(m: types.Message):
 @bot.message_handler(commands=["broadcast"])
 @admin_only_guard
 def cmd_broadcast(m):
+    # Extract message text
     payload = (m.text or "").split(maxsplit=1)
-    body = payload[1].strip() if len(payload)>1 else ""
+    body = payload[1].strip() if len(payload) > 1 else ""
+
+    # If no body, try getting it from the replied message
     if not body and m.reply_to_message:
         body = (m.reply_to_message.text or "").strip()
+
+    # If still no body, send instruction
     if not body:
         return bot.reply_to(m, "اكتب الرسالة بعد الأمر أو ردّ على رسالة.")
+
     header = "📰 خبار جديد - Breaking News"
-    ok=0; fail=0
+    ok, fail = 0, 0
+
+    # Iterate over all user IDs and send the message
     for uid in iter_all_user_ids():
         try:
             bot.send_message(uid, f"{header}\n---------------------------\n{body}")
-            ok+=1
-        except Exception:
-            fail+=1
-    return bot.reply_to(m, f"تم الإرسال: {ok} نجاح / {fail} فشل.")
+            ok += 1
+        except Exception as e:
+            fail += 1
+            # Optionally log the error:
+            # print(f"Failed to send to {uid}: {e}")
+
+    # Send a summary to the admin
+    return bot.reply_to(m, f"✅ تم الإرسال: {ok} نجاح / ❌ {fail} فشل.")
 
 
 @bot.message_handler(commands=["addmoney"])
